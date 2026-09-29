@@ -37,6 +37,9 @@ attack: ## Adversarial mock models vs. the guardrails
 storm: ## 5,000-alert storm through the ingestion funnel
 	$(ASAP) storm
 
+tokens: ## Measure per-run LLM input tokens: caching, compaction, budget
+	$(ASAP) tokens
+
 test: ## Rego policy tests + pytest
 	@if [ -x bin/opa ]; then bin/opa test policies/ -v; elif command -v opa >/dev/null; then opa test policies/ -v; fi
 	$(BIN)/pytest
@@ -53,4 +56,4 @@ docker-demo: ## Run the demo in Docker (no local Python needed)
 clean: ## Remove runs and caches
 	rm -rf runs .pytest_cache .ruff_cache **/__pycache__
 
-.PHONY: help setup demo demo-auto demo-bad-deploy demo-cpu demo-db attack storm test lint all docker-demo clean
+.PHONY: tokens help setup demo demo-auto demo-bad-deploy demo-cpu demo-db attack storm test lint all docker-demo clean

@@ -5,7 +5,7 @@ ASAP receives a production alert, investigates telemetry with an LLM-driven agen
 The design rule behind everything: **the LLM only proposes, and a deterministic control plane decides and acts.** The agent gets read-only telemetry tools. Every write goes through a typed proposal, then OPA/Rego policy, a dry-run, a blast-radius check, human approval where required, an idempotent executor, and verification. Prompt text is never a safety control.
 
 - [ARCHITECTURE.md](ARCHITECTURE.md): data plane and control plane, the agent state machine, tool contracts, and the choice of reasoning pattern
-- [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md): guardrails, blast radius and human-in-the-loop (HITL), audit, alert storms, failure modes and consistency
+- [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md): guardrails, blast radius and human-in-the-loop (HITL), audit, alert storms, measured LLM token cost and capacity, failure modes and consistency
 - [docs/adr](docs/adr/README.md): ten Architecture Decision Records: options considered, decision, trade-offs accepted
 
 ---
@@ -47,7 +47,7 @@ make docker-demo          # = docker compose run --rm asap demo --approve auto -
 | `make demo` | Three incidents investigated end to end, one at a time with a pause and recap between them (table below) |
 | `make attack` | 15 adversarial mock "LLMs" try to cause damage (drop the DB, restart-loop, prompt injection, fabricated or irrelevant evidence, and more). Every one is contained, and the table shows which guardrail stopped it |
 | `make storm` | 5,000 alerts in one minute collapse to **2 incidents** (flap suppression, debounce, dedup, dependency-graph correlation) before any LLM token is spent |
-| `.venv/bin/asap tokens` | Measures the input tokens each run would send to an LLM, with and without compaction and under a tight budget |
+| `make tokens` | Measures the input tokens each run would send to an LLM: typical runs, a worst case, early compaction vs prompt caching, and a tight per-run budget (see ADR-0010) |
 | `make test` | Rego policy unit tests (`opa test`) plus 68 pytest tests covering the guardrails, production edge cases, token controls and code-review regressions |
 | `.venv/bin/asap replay <run_id>` | Replays a run from its hash-chained audit log, with no LLM calls, and verifies the chain |
 
@@ -82,7 +82,7 @@ asap/
   ingest/       alert funnel (flap, debounce, dedup, group, correlate) + 5,000-alert storm generator
   tools/        typed tool contracts (Pydantic -> JSON Schema), gateway (quotas, evidence IDs), telemetry sanitizer
   agent/        state machine, orchestrator, prompts, LLM adapters (Anthropic, OpenAI-compatible), deterministic
-                reasoner, adversarial mock models
+                reasoner, adversarial mock models, context manager (prompt caching, compaction, per-run token budget)
   control/      control plane: Rego evaluation (fail-closed), blast radius, budgets/leases/circuit breaker, approval gate
   executor/     the only component with write credentials: dry-run, precondition check, idempotent apply, verify, revert rules
   audit/        hash-chained audit log + anchors
@@ -102,6 +102,8 @@ tests/          scenarios, adversarial attacks, production edge cases, unit test
 | CLI approval prompt | Slack interactive message (signed) + PagerDuty note, ownership from the service catalog |
 | Audit anchors in `runs/anchors.jsonl` | Chain heads anchored to WORM storage (S3 Object Lock) |
 | Verification "waits" by advancing a virtual clock | Real wall-clock verification window |
+| Token figures in `make tokens` are estimates (chars/4) from the deterministic reasoner | Provider-reported usage per call, already logged in `audit.jsonl` on live runs; capacity model re-derived from those |
+| Demos and CI use the deterministic reasoner; no scored live-model evaluation yet | Offline evaluation set of replayed incidents scoring diagnosis accuracy per model and prompt version, gating upgrades and any tier-1 autonomy |
 
 ## Troubleshooting
 
