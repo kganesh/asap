@@ -17,4 +17,4 @@ RUN pip install --no-cache-dir -e ".[dev]"
 
 ENV ASAP_RUNS_DIR=/app/runs PYTHONUNBUFFERED=1 COLUMNS=140
 ENTRYPOINT ["asap"]
-CMD ["demo", "--approve", "auto"]
+CMD ["demo", "--approve", "auto", "--no-pause"]

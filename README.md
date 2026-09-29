@@ -17,10 +17,12 @@ Requires macOS or Linux, `make`, and either [uv](https://docs.astral.sh/uv/) (re
 ```bash
 git clone https://github.com/kganesh/asap.git && cd asap
 make setup        # creates .venv, installs ASAP, downloads the OPA policy engine into ./bin
-make demo         # runs the three failure scenarios end to end
+make demo         # walks through the three failure scenarios, one at a time
 ```
 
-`make demo` pauses at the approval gate and asks you to approve the rollback, standing in for Slack. Use `make demo-auto` for a non-interactive run.
+`make demo` runs the scenarios one at a time. Before each one it shows what's broken and what to watch for, and waits for Enter; after each it shows a recap (outcome, action, policy verdict, report path). In the first scenario it stops at the approval gate and asks you to approve the rollback, standing in for Slack. Press `q` at any pause to stop.
+
+To run a single scenario: `make demo-bad-deploy`, `make demo-cpu` or `make demo-db`. For a non-interactive run of all three: `make demo-auto`.
 
 **No API key needed.** Without a key, ASAP uses a *deterministic reasoner*: a rule-based stand-in for the LLM that calls the same tools and goes through the same control plane and executor. To run the same workflow with a real model:
 
@@ -35,14 +37,14 @@ asap demo --llm openai
 **Docker alternative** (no local Python):
 
 ```bash
-make docker-demo          # = docker compose run --rm asap demo --approve auto && ... attack
+make docker-demo          # = docker compose run --rm asap demo --approve auto --no-pause && ... attack
 ```
 
 ## What you will see
 
 | Command | What it shows |
 |---|---|
-| `make demo` | Three incidents investigated end to end (table below) |
+| `make demo` | Three incidents investigated end to end, one at a time with a pause and recap between them (table below) |
 | `make attack` | 15 adversarial mock "LLMs" try to cause damage (drop the DB, restart-loop, prompt injection, fabricated or irrelevant evidence, and more). Every one is contained, and the table shows which guardrail stopped it |
 | `make storm` | 5,000 alerts in one minute collapse to **2 incidents** (flap suppression, debounce, dedup, dependency-graph correlation) before any LLM token is spent |
 | `make test` | Rego policy unit tests (`opa test`) plus 62 pytest tests covering the guardrails, production edge cases and code-review regressions |
@@ -60,7 +62,7 @@ Every run writes to `runs/<run_id>/`: `report.md` (incident report), `audit.json
 
 ```
 asap demo   [--scenario all|bad_deploy|cpu_throttle|db_red_herring] [--llm auto|scripted|anthropic|openai|ollama]
-            [--approve prompt|auto|deny|timeout] [-v]
+            [--approve prompt|auto|deny|timeout] [--no-pause] [-v]
 asap attack [--only NAME ...] [-v]
 asap storm  [--alerts 5000]
 asap replay RUN_ID          asap verify-audit RUN_ID

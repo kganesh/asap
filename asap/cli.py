@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 console = Console()
@@ -36,6 +37,42 @@ def _approval_mode(arg: str | None) -> str:
     return "prompt" if sys.stdin.isatty() else "auto"
 
 
+def _pause(interactive: bool, prompt: str) -> bool:
+    """Wait for Enter between scenarios. Returns False if the user asked to quit."""
+    if not interactive:
+        return True
+    try:
+        ans = console.input(f"\n[bold reverse] {prompt} [/] [dim](Enter to continue, q to quit)[/] ")
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return ans.strip().lower() not in ("q", "quit", "exit")
+
+
+def _scenario_intro(i: int, total: int, sc) -> None:  # type: ignore[no-untyped-def]
+    body = f"[bold]What's broken:[/] {sc.fault}\n\n[bold]Watch for:[/]\n" + \
+        "\n".join(f"  {n}. {w}" for n, w in enumerate(sc.watch_for, 1)) + \
+        f"\n\n[bold]Expected outcome:[/] {sc.expected_outcome}"
+    console.print(Panel(body, title=f"Scenario {i}/{total}: {sc.name}  -  {sc.title}", border_style="cyan",
+                        padding=(1, 2)))
+
+
+def _scenario_recap(sc, run, runs_dir: str) -> None:  # type: ignore[no-untyped-def]
+    act = f"{run.proposal.action} {run.proposal.target} {run.proposal.params}" if run.proposal else "none proposed"
+    verdict = f"{run.decision.verdict} (tier {run.decision.tier})" if run.decision else "-"
+    matched = {"bad_deploy": run.outcome == "RESOLVED" and bool(run.proposal) and run.proposal.action == "rollback",
+               "cpu_throttle": run.outcome == "RESOLVED" and bool(run.proposal) and run.proposal.action == "scale",
+               "db_red_herring": run.outcome == "REPORT_ONLY" and run.proposal is None}.get(sc.name)
+    check = "" if matched is None else ("[green]matches the expected outcome[/]" if matched
+                                         else "[yellow]differs from the expected outcome[/]")
+    if run.approval and not run.approval.get("approved"):
+        check += f" [dim](approval not given: {run.approval.get('reason')}, so nothing was executed)[/]"
+    console.print(Panel(
+        f"[bold]Outcome:[/] {run.outcome}  {check}\n[bold]Action:[/] {act}\n[bold]Policy verdict:[/] {verdict}\n"
+        f"[bold]Diagnosis:[/] {(run.diagnosis or {}).get('root_cause', '-')}\n\n"
+        f"[dim]Report: {runs_dir}/{run.run_id}/report.md\nReplay: asap replay {run.run_id}[/]",
+        title=f"Scenario {sc.name}: recap", border_style="green" if matched else "yellow"))
+
+
 def cmd_demo(a: argparse.Namespace) -> int:
     from .console import RichUI
     from .control.approval import ApprovalGate
@@ -45,29 +82,39 @@ def cmd_demo(a: argparse.Namespace) -> int:
     names = list(SCENARIOS) if a.scenario == "all" else [a.scenario]
     llm = _llm(a.llm)
     mode = _approval_mode(a.approve)
+    interactive = sys.stdin.isatty() and not a.no_pause
     ui = RichUI(console, verbose=a.verbose)
     env = Env.create(Path(a.runs_dir), names[0])
     console.rule(f"[bold]ASAP demo[/]  reasoner={llm.name}:{llm.model}  policy={env.policy.name}  approvals={mode}")
     if llm.name == "deterministic-reasoner":
         console.print("[dim]No ANTHROPIC_API_KEY / OPENAI_BASE_URL set: using the deterministic reasoner (no LLM). "
                       "It uses the same tools, control plane and executor. Set ANTHROPIC_API_KEY to run with Claude.[/]")
+    if interactive and len(names) > 1:
+        console.print(f"[dim]{len(names)} scenarios, one at a time. Each starts from a fresh simulated cluster.[/]")
     results = []
     try:
-        for n in names:
+        for i, n in enumerate(names, 1):
             sc = SCENARIOS[n]
-            console.rule(f"[bold]Scenario {n}[/]: {sc.title}")
-            console.print(f"[dim]expected: {sc.expected_outcome}[/]")
+            console.print()
+            console.rule(f"[bold]Scenario {i}/{len(names)}: {n}[/]")
+            _scenario_intro(i, len(names), sc)
+            if not _pause(interactive, f"Start scenario {i}/{len(names)}"):
+                break
             run, _ = run_scenario(env, n, llm, ApprovalGate(mode, render=ui.approval_packet), ui)
             results.append((n, sc, run))
+            _scenario_recap(sc, run, a.runs_dir)
+            if i < len(names) and not _pause(interactive, f"Next: scenario {i + 1}/{len(names)}, {names[i]}"):
+                break
     finally:
         env.close()
-    t = Table(title="Summary")
-    for col in ("scenario", "outcome", "action", "verdict", "expected"):
-        t.add_column(col)
-    for n, sc, run in results:
-        act = f"{run.proposal.action} {run.proposal.target}" if run.proposal else "-"
-        t.add_row(n, run.outcome or "", act, run.decision.verdict if run.decision else "-", sc.expected_outcome)
-    console.print(t)
+    if len(results) > 1:
+        t = Table(title="Summary")
+        for col in ("scenario", "outcome", "action", "verdict", "expected"):
+            t.add_column(col)
+        for n, sc, run in results:
+            act = f"{run.proposal.action} {run.proposal.target}" if run.proposal else "-"
+            t.add_row(n, run.outcome or "", act, run.decision.verdict if run.decision else "-", sc.expected_outcome)
+        console.print(t)
     console.print(f"Artifacts in [bold]{a.runs_dir}/[/]: report.md, audit.jsonl, spans.jsonl per run; metrics.prom")
     return 0
 
@@ -199,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--llm", default="auto", choices=["auto", "scripted", "anthropic", "openai", "ollama"], help=llm_help)
     d.add_argument("--approve", choices=["prompt", "auto", "deny", "timeout"],
                    help="approval mode (default: prompt in a terminal, auto otherwise)")
+    d.add_argument("--no-pause", action="store_true", help="run all scenarios back to back without waiting for Enter")
     d.add_argument("-v", "--verbose", action="store_true")
     d.set_defaults(fn=cmd_demo)
 

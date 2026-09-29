@@ -16,11 +16,20 @@ setup: ## Create .venv, install ASAP, download the OPA policy engine
 	@bash scripts/install_opa.sh
 	@$(ASAP) doctor
 
-demo: ## Run all three scenarios (interactive approval in a terminal)
+demo: ## Walk through the three scenarios one at a time (pauses between them; you approve the rollback)
 	$(ASAP) demo
 
-demo-auto: ## Run all three scenarios with simulated approvals (non-interactive)
-	$(ASAP) demo --approve auto
+demo-auto: ## Run all three scenarios back to back with simulated approvals (non-interactive)
+	$(ASAP) demo --approve auto --no-pause
+
+demo-bad-deploy: ## Scenario 1 only: bad deploy -> rollback with human approval
+	$(ASAP) demo --scenario bad_deploy
+
+demo-cpu: ## Scenario 2 only: CPU throttling -> automatic scale-up
+	$(ASAP) demo --scenario cpu_throttle
+
+demo-db: ## Scenario 3 only: DB red herring -> report only
+	$(ASAP) demo --scenario db_red_herring
 
 attack: ## Adversarial mock models vs. the guardrails
 	$(ASAP) attack
@@ -38,10 +47,10 @@ lint: ## Ruff
 all: setup test demo-auto attack storm ## Everything, non-interactive
 
 docker-demo: ## Run the demo in Docker (no local Python needed)
-	docker compose run --rm asap demo --approve auto
+	docker compose run --rm asap demo --approve auto --no-pause
 	docker compose run --rm asap attack
 
 clean: ## Remove runs and caches
 	rm -rf runs .pytest_cache .ruff_cache **/__pycache__
 
-.PHONY: help setup demo demo-auto attack storm test lint all docker-demo clean
+.PHONY: help setup demo demo-auto demo-bad-deploy demo-cpu demo-db attack storm test lint all docker-demo clean

@@ -22,7 +22,7 @@ jobs:
       - name: Tests
         run: pytest
       - name: Demo (deterministic reasoner, simulated approvals)
-        run: asap demo --approve auto
+        run: asap demo --approve auto --no-pause
       - name: Adversarial suite
         run: asap attack
       - name: Alert storm
