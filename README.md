@@ -49,7 +49,7 @@ make docker-demo          # = docker compose run --rm asap demo --approve auto -
 | `make attack` | 15 adversarial mock "LLMs" try to cause damage (drop the DB, restart-loop, prompt injection, fabricated or irrelevant evidence, and more). Every one is contained, and the table shows which guardrail stopped it |
 | `make storm` | 5,000 alerts in one minute collapse to **2 incidents** (flap suppression, debounce, dedup, dependency-graph correlation) before any LLM token is spent |
 | `make tokens` | Measures the input tokens each run would send to an LLM: typical runs, a worst case, early compaction vs prompt caching, and a tight per-run budget (see ADR-0010) |
-| `make test` | Rego policy unit tests (`opa test`) plus 68 pytest tests covering the guardrails, production edge cases, token controls and code-review regressions |
+| `make test` | Rego policy unit tests (`opa test`) plus 70 pytest tests covering the guardrails, production edge cases, token controls and code-review regressions |
 | `.venv/bin/asap replay <run_id>` | Replays a run from its hash-chained audit log, with no LLM calls, and verifies the chain |
 
 | Scenario | Injected fault | Correct outcome |
