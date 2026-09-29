@@ -1,0 +1,15 @@
+services:
+  asap:
+    build: .
+    image: asap:local
+    environment:
+      # Optional: set one of these to run with a real LLM instead of the deterministic reasoner.
+      - ANTHROPIC_API_KEY
+      - ASAP_MODEL
+      - OPENAI_API_KEY
+      - OPENAI_BASE_URL
+      - ASAP_KILL_SWITCH
+    volumes:
+      - ./runs:/app/runs
+    tty: true
+    stdin_open: true

@@ -1,0 +1,29 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install OPA
+        run: bash scripts/install_opa.sh
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check asap tests
+      - name: Policy tests (Rego)
+        run: bin/opa test policies/ -v
+      - name: Tests
+        run: pytest
+      - name: Demo (deterministic reasoner, simulated approvals)
+        run: asap demo --approve auto
+      - name: Adversarial suite
+        run: asap attack
+      - name: Alert storm
+        run: asap storm
