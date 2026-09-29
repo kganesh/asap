@@ -120,7 +120,8 @@ class RichUI:
         style = STATE_STYLE.get(run.outcome or "", "bold")
         self.c.print(Panel.fit(
             f"[{style}]{run.outcome}[/]: {run.outcome_reason}\n"
-            f"steps={run.steps} tool_calls={run.tool_calls} tokens in/out={run.tokens_in}/{run.tokens_out} "
+            f"steps={run.steps} tool_calls={run.tool_calls} input tokens={run.budget_tokens_in:,} "
+            f"(peak context {run.peak_context_tokens:,}, compactions {run.compactions}) output={run.tokens_out:,} "
             f"untrusted strings redacted={len(run.flagged_untrusted)}\n"
             f"report: {report}\naudit:  {report.parent / 'audit.jsonl'}   replay: asap replay {run.run_id}",
             title="Outcome", border_style=style.split()[-1]))

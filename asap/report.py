@@ -12,7 +12,8 @@ def write_report(run_dir: Path, run, incident) -> Path:  # type: ignore[no-untyp
     a(f"# Incident report: {incident.incident_id}\n")
     a(f"**Outcome:** `{run.outcome}` - {run.outcome_reason}  ")
     a(f"**Run:** `{run.run_id}` - reasoner `{run.llm_name}` - steps {run.steps}, tool calls {run.tool_calls}, "
-      f"tokens {run.tokens_in} in / {run.tokens_out} out\n")
+      f"input tokens {run.budget_tokens_in:,} (peak context {run.peak_context_tokens:,}, "
+      f"{run.compactions} compaction(s)), output tokens {run.tokens_out:,}\n")
     a("## Alerts\n")
     a("| Alert | Service | Severity | Started | Detail |\n|---|---|---|---|---|")
     for al in incident.alerts:

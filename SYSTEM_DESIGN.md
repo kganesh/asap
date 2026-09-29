@@ -131,20 +131,39 @@ Correlation roots each incident at the *deepest failing dependency* within a fai
 3. **Rules before reasoning:** known signatures (for example, a deploy in the last 15 minutes plus errors on the new version) are attached as runbook hints; the LLM confirms. **[built]** as hints.
 4. **Priority queue** by severity × tier (**[built]** scoring), with a queue-age SLO (P1 < 30 s, P3 < 10 min).
 5. **Bounded worker pool + token buckets per model**, with **30% of tokens reserved for P1**; exponential backoff with jitter on 429s.
-6. **Per-run caps** (**[built]**): 15 steps, 20 read calls, 2 replans, 180 s deadline. Hitting a cap produces a report, not a retry.
+6. **Per-run caps** (**[built]**): 15 steps, 20 read calls, 2 replans, 180 s deadline, and a **120k input-token budget** checked *before* each LLM call against the projected spend. Hitting a cap produces a report, not a retry.
 7. **Load shedding:** when queue age breaches its SLO, P3/P4 incidents fall back to rules-only reports; shedding is counted, never silent.
 8. **Global token budget / provider outage:** fall back to rules-only triage that **never auto-remediates**; it only annotates pages.
 
-**Capacity model** (assumptions stated so they can be challenged; validate with load tests):
+**Tokens per run (measured, `asap tokens`).** The loop re-sends the conversation every turn, so input grows with the square of the step count. The first draft of this model assumed ~40k input tokens per run without measuring; the measured figures below replace it. Counts are estimates (chars/4); a live run logs the provider's exact usage, including cache reads, in the audit log.
 
-| Quantity | Assumption | Derived |
+| Run | LLM calls | Peak context | Total input processed | Cost-equivalent with prompt caching¹ |
+|---|---|---|---|---|
+| `bad_deploy` | 11 | 6.0k | 48k | 19k |
+| `cpu_throttle` | 11 | 6.2k | 48k | 19k |
+| `db_red_herring` (replans) | 14 | 6.5k | 66k | 22k |
+| Worst case: 15 steps of max-size log and trace results | 16 | 9.7k | 101k | 22k |
+| Worst case with aggressive compaction (6k threshold) | 16 | 6.5k | 83k | **38k** |
+| Worst case under a 40k budget | 8 | 6.3k | 36k (stopped) | 12k |
+
+¹ Cached prefix billed at 0.1x, newly written context at 1.25x.
+
+Two findings shaped the design ([ADR-0010](docs/adr/0010-context-caching-over-compaction.md)):
+
+- **The floor is the tool schemas, not the results.** System prompt plus schemas are ~4.4k of the ~6k investigation context. Prompt caching of the *whole* conversation prefix (the Anthropic adapter marks the last block as a cache breakpoint) is therefore the cost lever: it cuts the typical run from ~48-66k to ~19-22k cost-equivalent.
+- **Compaction fights caching.** Summarising older tool results rewrites history and invalidates the cached prefix, so compacting early made the worst case 70% *more* expensive (38k vs 22k). Compaction is kept as a safety valve for runaway context size (threshold 16k, keep the last 3 results verbatim, digests keep their evidence IDs), not as a cost optimisation.
+
+**Capacity model** (validate with load tests; live-model runs will differ from the deterministic reasoner):
+
+| Quantity | Value | Derived |
 |---|---|---|
 | Compression after the funnel | 500-2,500x in a cascade (measured: 2,500x) | 2-10 incidents / min |
-| Mean active run time (excluding approval waits) | ~90 s | 0.67 runs / worker / min |
+| Mean active run time (excluding approval waits) | ~90 s (assumed; LLM latency dominates) | 0.67 runs / worker / min |
 | Workers at 10 incidents / min | 10 ÷ 0.67 | 15, provision 20 |
-| Tokens per run | ~40k in (cached system prompt + schemas), ~4k out | ~440k tokens / min at peak; size the provider tier to 2x |
+| Input tokens per run | ~48-66k processed (≤ 101k worst case, hard cap 120k); ~19-22k cost-equivalent with caching | At 10 incidents/min: ~0.5-0.7M processed tokens/min, ~0.2M cost-equivalent. Size the provider rate limit to 2x processed tokens unless cache reads are exempt from the input-token rate limit on the chosen model |
+| Output tokens per run | ~1-2k (one tool call plus `reasoning` per turn) | ~20k / min |
 
-**Token cost levers:** prompt caching on the static system prompt and tool schemas (**[built]** `cache_control`); tool results summarized server-side (percentiles and change points, clustered log templates, not raw lines) (**[built]**); smaller model for triage and larger model for root-cause analysis (RCA) (**[design]**); reuse a recent diagnosis for a re-fired incident while its evidence is fresh (**[design]**).
+**Token cost levers:** prompt caching of the system prompt, tool schemas and conversation prefix (**[built]**); tool results summarized server-side (percentiles and change points, clustered log templates, not raw lines) (**[built]**); per-run budget and threshold compaction (**[built]**); fewer tools per phase to shrink the schema floor (**[design]**); smaller model for triage and larger model for root-cause analysis (RCA) (**[design]**); reuse a recent diagnosis for a re-fired incident while its evidence is fresh (**[design]**).
 
 **LLM latency spike (for example, a 30 s stall on a P1):** every call's timeout comes from the run's remaining deadline; on timeout, 429 or 5xx the Anthropic adapter hedges to a fallback model (`claude-haiku-4-5`), then ends as report-only with the evidence so far (**[built]** `test_anthropic_adapter_falls_back_then_gives_up`, `test_llm_outage_degrades_to_report_only`, `test_deadline_ends_run_with_report`). Because ASAP sits beside paging, a stall delays ASAP's annotation, never the page.
 

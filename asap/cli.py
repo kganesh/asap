@@ -187,6 +187,21 @@ def _replay_detail(event: str, p: dict) -> str:
     return json.dumps(p, default=str)[:180]
 
 
+def cmd_tokens(a: argparse.Namespace) -> int:
+    from .agent.tokenreport import measure
+
+    rows = measure(Path(a.runs_dir) / "tokens")
+    t = Table(title="Input tokens per run (estimated: chars/4). Cost-equivalent models prompt caching (read 0.1x, write 1.25x)")
+    for col in ("run", "LLM calls", "peak context", "total input", "cost-equiv. (cached)", "compactions", "outcome"):
+        t.add_column(col, justify="left" if col in ("run", "outcome") else "right")
+    for r in rows:
+        t.add_row(r["run"], str(r["llm_calls"]), f"{r['peak_context']:,}", f"{r['total_input']:,}",
+                  f"{r['cost_equivalent_cached']:,}", str(r["compactions"]),
+                  r["outcome"] + (" (token budget)" if "budget" in r["reason"] else ""))
+    console.print(t)
+    return 0
+
+
 def cmd_replay(a: argparse.Namespace) -> int:
     path = Path(a.runs_dir) / a.run_id / "audit.jsonl"
     if not path.exists():
@@ -258,6 +273,9 @@ def main(argv: list[str] | None = None) -> int:
     st = sub.add_parser("storm", help="alert storm through the ingestion funnel")
     st.add_argument("--alerts", type=int, default=5000)
     st.set_defaults(fn=cmd_storm)
+
+    tk = sub.add_parser("tokens", help="measure per-run LLM input tokens, compaction and budget")
+    tk.set_defaults(fn=cmd_tokens)
 
     rp = sub.add_parser("replay", help="replay a run from its audit log")
     rp.add_argument("run_id")

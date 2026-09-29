@@ -17,6 +17,7 @@ Each decision, with the alternatives considered and the costs accepted, is recor
 | [0007](docs/adr/0007-kafka-keyed-by-failure-domain.md) | Alert stream keyed by failure domain | Hot partitions during large-cell storms |
 | [0008](docs/adr/0008-remediate-through-controllers.md) | Roll back through GitOps, scale through the HPA | Slower (sync interval); Git and Argo CD in the path |
 | [0009](docs/adr/0009-deterministic-reasoner-fallback.md) | Deterministic reasoner when no LLM key is set | Proves the guardrails, not LLM diagnosis quality |
+| [0010](docs/adr/0010-context-caching-over-compaction.md) | Cache the conversation prefix; compact only as a safety valve; per-run token budget | Contexts stay larger (≤ 16k) to keep the cache warm |
 
 Legend used below: **[built]** means implemented in this PoC; **[design]** means specified for production but not built.
 
@@ -212,7 +213,7 @@ Run state (plan, evidence, diagnosis, proposal, decision, approval, execution) l
 
 | Backend | Selected when | Notes |
 |---|---|---|
-| `AnthropicLLM` | `ANTHROPIC_API_KEY` set | Forced tool choice (`any`, no parallel calls); prompt caching on system prompt and tool schemas; per-call timeout from the run deadline; on timeout, 429 or 5xx it hedges to a fallback model, then ends as report-only |
+| `AnthropicLLM` | `ANTHROPIC_API_KEY` set | Forced tool choice (`any`, no parallel calls); prompt caching on system prompt, tool schemas and the conversation prefix (the orchestrator adds threshold compaction and a per-run token budget, see ADR-0010); per-call timeout from the run deadline; on timeout, 429 or 5xx it hedges to a fallback model, then ends as report-only |
 | `OpenAICompatLLM` | `OPENAI_BASE_URL` / `OPENAI_API_KEY` | OpenAI or local Ollama; `tool_choice=required` with a fallback |
 | `DeterministicReasoner` | no key | Rule-based SRE checklist over real tool results (temporal deploy correlation, saturation, downstream dominance). It is **not scenario-aware** and uses the same gateway and control plane |
 | `ScriptedLLM` (adversarial) | `asap attack`, tests | Hostile scripted models proving the guardrails hold regardless of model behavior |

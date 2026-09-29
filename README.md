@@ -6,7 +6,7 @@ The design rule behind everything: **the LLM only proposes, and a deterministic 
 
 - [ARCHITECTURE.md](ARCHITECTURE.md): data plane and control plane, the agent state machine, tool contracts, and the choice of reasoning pattern
 - [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md): guardrails, blast radius and human-in-the-loop (HITL), audit, alert storms, failure modes and consistency
-- [docs/adr](docs/adr/README.md): nine Architecture Decision Records: options considered, decision, trade-offs accepted
+- [docs/adr](docs/adr/README.md): ten Architecture Decision Records: options considered, decision, trade-offs accepted
 
 ---
 
@@ -47,7 +47,8 @@ make docker-demo          # = docker compose run --rm asap demo --approve auto -
 | `make demo` | Three incidents investigated end to end, one at a time with a pause and recap between them (table below) |
 | `make attack` | 15 adversarial mock "LLMs" try to cause damage (drop the DB, restart-loop, prompt injection, fabricated or irrelevant evidence, and more). Every one is contained, and the table shows which guardrail stopped it |
 | `make storm` | 5,000 alerts in one minute collapse to **2 incidents** (flap suppression, debounce, dedup, dependency-graph correlation) before any LLM token is spent |
-| `make test` | Rego policy unit tests (`opa test`) plus 62 pytest tests covering the guardrails, production edge cases and code-review regressions |
+| `.venv/bin/asap tokens` | Measures the input tokens each run would send to an LLM, with and without compaction and under a tight budget |
+| `make test` | Rego policy unit tests (`opa test`) plus 68 pytest tests covering the guardrails, production edge cases, token controls and code-review regressions |
 | `.venv/bin/asap replay <run_id>` | Replays a run from its hash-chained audit log, with no LLM calls, and verifies the chain |
 
 | Scenario | Injected fault | Correct outcome |
@@ -65,6 +66,7 @@ asap demo   [--scenario all|bad_deploy|cpu_throttle|db_red_herring] [--llm auto|
             [--approve prompt|auto|deny|timeout] [--no-pause] [-v]
 asap attack [--only NAME ...] [-v]
 asap storm  [--alerts 5000]
+asap tokens                 # measured LLM input tokens per run: caching, compaction, budget
 asap replay RUN_ID          asap verify-audit RUN_ID
 asap doctor                 # which reasoner and policy engine will be used
 asap sim --scenario NAME --port 8080    # run the simulator standalone; browse http://localhost:8080/docs

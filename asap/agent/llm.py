@@ -44,6 +44,8 @@ class LLMResponse:
     tokens_out: int = 0
     model: str = ""
     latency_ms: float = 0.0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 class LLM(Protocol):
@@ -67,7 +69,9 @@ class AnthropicLLM:
         self.fallback = os.environ.get("ASAP_FALLBACK_MODEL", fallback or "") or None
 
     @staticmethod
-    def to_messages(messages: list[dict]) -> list[dict]:
+    def to_messages(messages: list[dict], cache_tail: bool = False) -> list[dict]:
+        """Convert to Anthropic blocks. cache_tail marks the last block as a cache breakpoint, so the whole
+        conversation prefix is served from the prompt cache on the next turn (until a compaction rewrites it)."""
         out: list[dict] = []
         for m in messages:
             if m["role"] == "user":
@@ -85,6 +89,8 @@ class AnthropicLLM:
                 out[-1]["content"].extend(blocks)
             else:
                 out.append({"role": role, "content": blocks})
+        if cache_tail and out:
+            out[-1]["content"][-1] = {**out[-1]["content"][-1], "cache_control": {"type": "ephemeral"}}
         return out
 
     def _call(self, model: str, system: str, messages: list[dict], tools: list[dict], timeout_s: float,  # type: ignore[no-untyped-def]
@@ -95,7 +101,7 @@ class AnthropicLLM:
             model=model, max_tokens=max_tokens,
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             tools=tool_defs, tool_choice={"type": "any", "disable_parallel_tool_use": True},
-            messages=self.to_messages(messages), timeout=timeout_s)
+            messages=self.to_messages(messages, cache_tail=True), timeout=timeout_s)
 
     def next(self, system: str, messages: list[dict], tools: list[dict], run: RunState, phase: str,
              timeout_s: float) -> LLMResponse:
@@ -129,8 +135,10 @@ class AnthropicLLM:
         if tool is None:
             raise LLMUnavailable("model returned no tool call despite forced tool choice")
         thought = " ".join(b.text for b in resp.content if b.type == "text").strip()
-        return LLMResponse(tool.name, dict(tool.input), tool.id, thought, resp.usage.input_tokens,
-                           resp.usage.output_tokens, resp.model, (time.time() - t0) * 1000)
+        u = resp.usage
+        return LLMResponse(tool.name, dict(tool.input), tool.id, thought, u.input_tokens, u.output_tokens, resp.model,
+                           (time.time() - t0) * 1000, int(getattr(u, "cache_read_input_tokens", 0) or 0),
+                           int(getattr(u, "cache_creation_input_tokens", 0) or 0))
 
 
 # ---------------------------------------------------------------------------- OpenAI-compatible

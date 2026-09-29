@@ -38,6 +38,7 @@ from ..tools.gateway import ToolGateway, ToolRejected
 from ..tools.schemas import ACTION_TOOLS, ACTION_TYPE, READ_TOOLS, TOOL_SCHEMA_VERSION, tool_specs
 from . import prompts
 from . import states as S
+from .context import ContextManager, TokenBudgetExceeded, estimate_tokens
 from .llm import LLM, LLMResponse, LLMUnavailable
 
 log = logging.getLogger(__name__)
@@ -81,6 +82,8 @@ class Orchestrator:
         self._deadline = time.time() + self.limits.deadline_s
         self._messages: list[dict] = []
         self._services: list[str] = []
+        self._ctx = ContextManager(self.limits.compact_at_tokens, self.limits.keep_recent_results,
+                                   self.limits.max_run_input_tokens)
         self.ui.start(run, incident)
         with self.tracer.start_as_current_span("asap.incident", attributes={
                 "asap.run_id": run.run_id, "asap.incident_id": incident.incident_id,
@@ -92,6 +95,9 @@ class Orchestrator:
                 self._drive(run, incident)
             except DeadlineExceeded:
                 self._abort(f"run deadline of {self.limits.deadline_s:.0f}s exceeded; reporting evidence gathered so far")
+            except TokenBudgetExceeded as e:
+                log.warning("token budget exhausted in run %s: %s", run.run_id, e)
+                self._abort(f"{e}; reporting evidence gathered so far")
             except LLMUnavailable as e:
                 log.warning("LLM unavailable in run %s: %s", run.run_id, e)
                 self._abort(f"LLM unavailable ({e}); degraded to report-only (paging is unaffected)")
@@ -374,12 +380,21 @@ class Orchestrator:
         if remaining <= 0:
             raise DeadlineExceeded()
         run = self._run
+        specs = tool_specs(tools, self._services)
+        compaction = self._ctx.maybe_compact(prompts.SYSTEM, specs, self._messages, run)
+        if compaction:
+            run.compactions += 1
+            self._log("system", "context_compacted", compaction)
+        context_tokens = estimate_tokens(prompts.SYSTEM, specs, self._messages)
+        run.peak_context_tokens = max(run.peak_context_tokens, context_tokens)
+        self._ctx.check_budget(run, context_tokens)  # raises TokenBudgetExceeded before spending
         with self._span("gen_ai.chat", {"gen_ai.system": self.llm.name, "gen_ai.request.model": self.llm.model,
-                                        "asap.phase": phase}) as sp:
-            resp = self.llm.next(prompts.SYSTEM, self._messages, tool_specs(tools, self._services), run, phase,
+                                        "asap.phase": phase, "asap.context_tokens_est": context_tokens}) as sp:
+            resp = self.llm.next(prompts.SYSTEM, self._messages, specs, run, phase,
                                  min(self.limits.llm_call_timeout_s, remaining))
             sp.set_attribute("gen_ai.usage.input_tokens", resp.tokens_in)
             sp.set_attribute("gen_ai.usage.output_tokens", resp.tokens_out)
+            sp.set_attribute("gen_ai.usage.cache_read_input_tokens", resp.cache_read_tokens)
             sp.set_attribute("gen_ai.response.tool", resp.tool_name)
         if not isinstance(resp.tool_args, dict):  # e.g. an OpenAI-compatible model returned a JSON list
             resp.tool_args = {"_non_object_arguments": resp.tool_args}
@@ -387,12 +402,16 @@ class Orchestrator:
         reasoning = resp.thought or str(resp.tool_args.get("reasoning", ""))
         run.tokens_in += resp.tokens_in
         run.tokens_out += resp.tokens_out
+        run.tokens_cache_read += resp.cache_read_tokens
+        processed = resp.tokens_in + resp.cache_read_tokens + resp.cache_write_tokens
+        run.budget_tokens_in += processed if processed else context_tokens  # no provider usage: use the estimate
         m.TOKENS.labels(resp.model or self.llm.model, "in").inc(resp.tokens_in)
         m.TOKENS.labels(resp.model or self.llm.model, "out").inc(resp.tokens_out)
         self._messages.append({"role": "assistant", "text": resp.thought,
                                "tool_call": {"id": resp.tool_id, "name": resp.tool_name, "args": resp.tool_args}})
         self._log("agent", "llm_turn", {"phase": phase, "tool": resp.tool_name, "args": resp.tool_args,
-                                        "reasoning": reasoning, "tokens_in": resp.tokens_in,
+                                        "reasoning": reasoning, "context_tokens_est": context_tokens,
+                                        "tokens_in": resp.tokens_in, "cache_read_tokens": resp.cache_read_tokens,
                                         "tokens_out": resp.tokens_out, "latency_ms": round(resp.latency_ms, 1)})
         self.ui.llm(run, phase, resp, reasoning)
         return resp
@@ -511,7 +530,10 @@ class Orchestrator:
         span.set_attribute("gen_ai.usage.output_tokens", run.tokens_out)
         self._log("system", "run_finished", {"outcome": run.outcome, "reason": run.outcome_reason,
                                              "steps": run.steps, "tokens_in": run.tokens_in,
-                                             "tokens_out": run.tokens_out,
+                                             "tokens_out": run.tokens_out, "tokens_cache_read": run.tokens_cache_read,
+                                             "budget_tokens_in": run.budget_tokens_in,
+                                             "peak_context_tokens": run.peak_context_tokens,
+                                             "compactions": run.compactions,
                                              "untrusted_strings_redacted": len(run.flagged_untrusted)})
         self._audit.anchor()
         m.RUNS.labels(run.outcome or "unknown").inc()

@@ -79,8 +79,12 @@ class RunState:
     outcome_reason: str = ""
     steps: int = 0
     tool_calls: int = 0
-    tokens_in: int = 0
+    tokens_in: int = 0  # provider-reported uncached input tokens
     tokens_out: int = 0
+    tokens_cache_read: int = 0
+    budget_tokens_in: int = 0  # all input tokens processed (uncached + cache read/write, or estimate): budgeted
+    peak_context_tokens: int = 0
+    compactions: int = 0
     flagged_untrusted: list[str] = field(default_factory=list)
     transitions: list[tuple[str, str, str]] = field(default_factory=list)
     started_wall: float = field(default_factory=time.time)
