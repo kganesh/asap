@@ -24,7 +24,7 @@ class DeterministicReasoner:
 
     # ------------------------------------------------------------------ helpers
     def _call(self, name: str, args: dict, thought: str) -> LLMResponse:
-        """Like Claude under forced tool choice, the reasoning travels in the tool's `reasoning` field."""
+        """As with a live model, the reasoning travels in the tool's required `reasoning` field."""
         self._n += 1
         return LLMResponse(name, {"reasoning": thought or f"{name} per checklist", **args}, f"det_{self._n}", "",
                            model=self.model)

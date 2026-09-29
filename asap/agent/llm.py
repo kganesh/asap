@@ -1,6 +1,6 @@
 """LLM backends behind one interface: exactly one tool call per turn.
 
-  AnthropicLLM   - Claude via the Anthropic Messages API (tool use, forced tool choice, prompt caching,
+  AnthropicLLM   - Claude via the Anthropic Messages API (tool use, forced tool choice where the model allows it, prompt caching,
                    per-call timeout from the run deadline, fallback model on overload/timeout)
   OpenAICompatLLM - any OpenAI-compatible chat-completions endpoint (OpenAI, or local Ollama)
   DeterministicReasoner (scripted.py) - no key needed; same tools, same guardrails
@@ -67,6 +67,7 @@ class AnthropicLLM:
         self.client = anthropic.Anthropic(max_retries=2)
         self.model = model or os.environ.get("ASAP_MODEL", DEFAULT_ANTHROPIC_MODEL)
         self.fallback = os.environ.get("ASAP_FALLBACK_MODEL", fallback or "") or None
+        self._tool_choice: dict[str, str] = {}  # model -> "any" | "auto" (learned from the API)
 
     @staticmethod
     def to_messages(messages: list[dict], cache_tail: bool = False) -> list[dict]:
@@ -93,15 +94,32 @@ class AnthropicLLM:
             out[-1]["content"][-1] = {**out[-1]["content"][-1], "cache_control": {"type": "ephemeral"}}
         return out
 
+    NUDGE = ("Respond by calling exactly one of the provided tools now. Do not answer in plain text; put your "
+             "reasoning in the tool's `reasoning` field.")
+
     def _call(self, model: str, system: str, messages: list[dict], tools: list[dict], timeout_s: float,  # type: ignore[no-untyped-def]
-              max_tokens: int = 2048):
+              max_tokens: int = 2048, extra: list[dict] | None = None):
         tool_defs = [dict(t) for t in tools]
         tool_defs[-1] = {**tool_defs[-1], "cache_control": {"type": "ephemeral"}}
         return self.client.messages.create(
             model=model, max_tokens=max_tokens,
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            tools=tool_defs, tool_choice={"type": "any", "disable_parallel_tool_use": True},
-            messages=self.to_messages(messages, cache_tail=True), timeout=timeout_s)
+            tools=tool_defs,
+            tool_choice={"type": self._tool_choice.get(model, "any"), "disable_parallel_tool_use": True},
+            messages=self.to_messages(messages, cache_tail=True) + (extra or []), timeout=timeout_s)
+
+    def _create(self, model: str, *args, **kwargs):  # type: ignore[no-untyped-def]
+        """One API call. Models that reject forced tool choice (Opus/Sonnet 5.5 and newer return a 400 for
+        tool_choice any/tool) are switched to `auto` once and remembered; the orchestrator and the gateway
+        already treat a missing or invalid tool call as a recoverable error, so safety does not depend on it."""
+        try:
+            return self._call(model, *args, **kwargs)
+        except self._anthropic.BadRequestError as e:
+            if "tool_choice" not in str(e) or self._tool_choice.get(model) == "auto":
+                raise
+            log.warning("%s rejects forced tool choice; switching to tool_choice=auto for this model", model)
+            self._tool_choice[model] = "auto"
+            return self._call(model, *args, **kwargs)
 
     def next(self, system: str, messages: list[dict], tools: list[dict], run: RunState, phase: str,
              timeout_s: float) -> LLMResponse:
@@ -111,7 +129,7 @@ class AnthropicLLM:
         last_err: Exception | None = None
         for model in models:
             try:
-                resp = self._call(model, system, messages, tools, timeout_s)
+                resp = self._create(model, system, messages, tools, timeout_s)
                 break
             except (a.APITimeoutError, a.RateLimitError, a.InternalServerError, a.APIConnectionError) as e:
                 log.warning("Anthropic call to %s failed (%s); hedging to fallback", model, type(e).__name__)
@@ -124,21 +142,33 @@ class AnthropicLLM:
                 raise LLMUnavailable(f"Anthropic API error {e.status_code}: {e.message}") from e
         else:
             raise LLMUnavailable(f"LLM unavailable after fallback: {last_err}")
+        usage = [resp.usage]
         tool = next((b for b in resp.content if b.type == "tool_use"), None)
-        if tool is None and getattr(resp, "stop_reason", None) == "max_tokens":
-            log.warning("response truncated before the tool call; retrying once with a larger budget")
-            try:
-                resp = self._call(resp.model, system, messages, tools, timeout_s, max_tokens=4096)
-            except a.APIError as e:
-                raise LLMUnavailable(f"retry after truncation failed: {e}") from e
-            tool = next((b for b in resp.content if b.type == "tool_use"), None)
+        try:
+            if tool is None and getattr(resp, "stop_reason", None) == "max_tokens":
+                log.warning("response truncated before the tool call; retrying once with a larger budget")
+                resp = self._create(resp.model, system, messages, tools, timeout_s, max_tokens=4096)
+                usage.append(resp.usage)
+                tool = next((b for b in resp.content if b.type == "tool_use"), None)
+            if tool is None:
+                # tool_choice=auto allows a plain-text answer: show it back and ask for a tool call, once.
+                text = " ".join(b.text for b in resp.content if b.type == "text").strip() or "(no content)"
+                log.warning("model answered without a tool call; nudging once")
+                extra = [{"role": "assistant", "content": [{"type": "text", "text": text}]},
+                         {"role": "user", "content": [{"type": "text", "text": self.NUDGE}]}]
+                resp = self._create(resp.model, system, messages, tools, timeout_s, extra=extra)
+                usage.append(resp.usage)
+                tool = next((b for b in resp.content if b.type == "tool_use"), None)
+        except a.APIError as e:
+            raise LLMUnavailable(f"retry for a missing tool call failed: {e}") from e
         if tool is None:
-            raise LLMUnavailable("model returned no tool call despite forced tool choice")
+            raise LLMUnavailable("model returned no tool call after a nudge")
         thought = " ".join(b.text for b in resp.content if b.type == "text").strip()
-        u = resp.usage
-        return LLMResponse(tool.name, dict(tool.input), tool.id, thought, u.input_tokens, u.output_tokens, resp.model,
-                           (time.time() - t0) * 1000, int(getattr(u, "cache_read_input_tokens", 0) or 0),
-                           int(getattr(u, "cache_creation_input_tokens", 0) or 0))
+        return LLMResponse(tool.name, dict(tool.input), tool.id, thought,
+                           sum(u.input_tokens for u in usage), sum(u.output_tokens for u in usage), resp.model,
+                           (time.time() - t0) * 1000,
+                           sum(int(getattr(u, "cache_read_input_tokens", 0) or 0) for u in usage),
+                           sum(int(getattr(u, "cache_creation_input_tokens", 0) or 0) for u in usage))
 
 
 # ---------------------------------------------------------------------------- OpenAI-compatible

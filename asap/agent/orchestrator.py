@@ -398,7 +398,8 @@ class Orchestrator:
             sp.set_attribute("gen_ai.response.tool", resp.tool_name)
         if not isinstance(resp.tool_args, dict):  # e.g. an OpenAI-compatible model returned a JSON list
             resp.tool_args = {"_non_object_arguments": resp.tool_args}
-        # Forced tool choice suppresses free text on Claude: the schema's `reasoning` field carries it.
+        # Under forced tool choice Claude emits no free text, so the schema's `reasoning` field carries it;
+        # models that only allow tool_choice=auto may also send text, which is kept as the thought.
         reasoning = resp.thought or str(resp.tool_args.get("reasoning", ""))
         run.tokens_in += resp.tokens_in
         run.tokens_out += resp.tokens_out

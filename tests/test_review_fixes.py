@@ -172,6 +172,43 @@ def test_anthropic_truncated_response_is_retried_once():
 
     llm = AnthropicLLM.__new__(AnthropicLLM)
     llm._anthropic, llm.model, llm.fallback = anthropic, "claude-sonnet-5-5", None
+    llm._tool_choice = {}
     llm.client = SimpleNamespace(messages=SimpleNamespace(create=create))
     r = llm.next("sys", [{"role": "user", "text": "x"}], tool_specs(["submit_plan"]), None, "PLAN", 5)
     assert r.tool_name == "submit_plan" and calls == [2048, 4096]
+
+
+def test_models_that_reject_forced_tool_choice_fall_back_to_auto_and_nudge():
+    """Found in the first live run: Claude Sonnet 5.5 returns 400 for tool_choice any/tool."""
+    import anthropic
+
+    calls = []
+
+    def create(**kw):
+        calls.append((kw["tool_choice"]["type"], len(kw["messages"])))
+        if kw["tool_choice"]["type"] == "any":
+            raise anthropic.BadRequestError(
+                "tool_choice: type \"tool\" and \"any\" are not supported for this model.",
+                response=httpx.Response(400, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")),
+                body=None)
+        if len(calls) == 2:  # auto mode: the model answers in text first
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text="I think it's the deploy.")],
+                                   stop_reason="end_turn", usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+                                   model=kw["model"])
+        return SimpleNamespace(content=[SimpleNamespace(type="text", text="Planning."),
+                                        SimpleNamespace(type="tool_use", id="t", name="submit_plan",
+                                                        input={"reasoning": "r", "hypotheses": ["h"], "steps": ["s"]})],
+                               stop_reason="tool_use", usage=SimpleNamespace(input_tokens=12, output_tokens=7),
+                               model=kw["model"])
+
+    llm = AnthropicLLM.__new__(AnthropicLLM)
+    llm._anthropic, llm.model, llm.fallback = anthropic, "claude-sonnet-5-5", None
+    llm._tool_choice = {}
+    llm.client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    r = llm.next("sys", [{"role": "user", "text": "x"}], tool_specs(["submit_plan"]), None, "PLAN", 5)
+    assert r.tool_name == "submit_plan" and r.thought == "Planning."
+    assert [c[0] for c in calls] == ["any", "auto", "auto"]
+    assert calls[2][1] == calls[1][1] + 2, "the nudge adds the text reply and a user reminder"
+    assert r.tokens_in == 22, "usage is summed across the retries"
+    llm.next("sys", [{"role": "user", "text": "x"}], tool_specs(["submit_plan"]), None, "PLAN", 5)
+    assert calls[3][0] == "auto", "the fallback to auto is remembered per model"

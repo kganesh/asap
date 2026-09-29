@@ -82,6 +82,7 @@ def _anthropic_with(fake_create):
 
     llm._anthropic = anthropic
     llm.model, llm.fallback = "claude-sonnet-5-5", "claude-haiku-4-5-20251001"
+    llm._tool_choice = {}
     llm.client = SimpleNamespace(messages=SimpleNamespace(create=fake_create))
     return llm
 

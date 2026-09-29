@@ -7,8 +7,8 @@ Three classes of tool, with different trust:
 
 There is no free-form tool (no shell, kubectl, SQL). The action space is a closed enum.
 
-Every tool requires a `reasoning` field. With forced tool choice, Claude emits no free text before a
-tool call, so this field is how the model's reasoning reaches the audit log.
+Every tool requires a `reasoning` field. Under forced tool choice Claude emits no free text before a tool
+call, and under tool_choice=auto it may or may not, so this field is how reasoning reliably reaches the audit log.
 """
 
 from __future__ import annotations
