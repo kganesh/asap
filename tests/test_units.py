@@ -43,6 +43,7 @@ BASE = {
     "evidence": {"valid": True, "has_relevant_metric": True}, "scope": {"in_incident_scope": True},
     "budget": {"actions_last_30m": 0, "actions_last_24h": 0, "circuit_open": False},
     "controls": {"kill_switch": False, "change_freeze": False}, "blast_radius": 25,
+    "fleet": {"window_minutes": 10, "auto_actions": 0, "actions": 0, "open_incidents": 1},
 }
 
 
@@ -57,6 +58,8 @@ BASE = {
     ({"controls": {"kill_switch": False, "change_freeze": True}}, "require_approval"),
     ({"blast_radius": 60}, "require_approval"),
     ({"action": {"type": "delete_namespace", "target": "x", "params": {}}}, "deny"),
+    ({"fleet": {"window_minutes": 10, "auto_actions": 2, "actions": 2, "open_incidents": 1}}, "require_approval"),
+    ({"fleet": {"window_minutes": 10, "auto_actions": 0, "actions": 0, "open_incidents": 4}}, "require_approval"),
 ])
 def test_policy_decisions(patch, decision):
     out = PolicyEngine().evaluate({**BASE, **patch})

@@ -14,5 +14,6 @@ Each record captures one decision: the context, the options considered, what was
 | [0008](0008-remediate-through-controllers.md) | Roll back through GitOps and scale through the HPA | Built (simulated Argo CD) |
 | [0009](0009-deterministic-reasoner-fallback.md) | A deterministic reasoner when no LLM key is configured | Built |
 | [0010](0010-context-caching-over-compaction.md) | Cache the conversation prefix; compact only as a safety valve; per-run token budget | Built |
+| [0011](0011-fleet-wide-blast-radius.md) | Fleet-wide blast radius: per-domain auto budget, incident-storm brake, fleet lock | Built |
 
 New decisions get the next number. A superseded ADR stays in place with its status changed to "Superseded by ADR-NNNN".

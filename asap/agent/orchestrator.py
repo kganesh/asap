@@ -73,7 +73,7 @@ class Orchestrator:
     def run(self, incident: Incident) -> RunState:
         """Run one incident to a terminal state. Never raises: any failure ends as REPORT_ONLY."""
         run = RunState(new_id("run"), incident.incident_id, incident.root_service, incident.services,
-                       incident.alerts, f"{self.llm.name}:{self.llm.model}")
+                       incident.alerts, f"{self.llm.name}:{self.llm.model}", domain=incident.domain)
         versions = {"asap": __version__, "model": self.llm.model, "prompt": prompts.PROMPT_VERSION,
                     "tool_schema": TOOL_SCHEMA_VERSION, "policy_bundle": self.policy.digest,
                     "policy_engine": self.policy.name}
@@ -139,6 +139,7 @@ class Orchestrator:
         with self._span("asap.state.TRIAGE"):
             if self._firing(run) is False:  # unknown -> proceed: this gate is detection-side
                 return self._to(S.REPORT_ONLY, "alerts resolved before investigation started")
+            self.store.record_incident(run.incident_id, run.domain, incident.started_at)
             if not self.store.acquire_lease(f"incident:{run.incident_id}", run.run_id, self._clock()):
                 return self._to(S.REPORT_ONLY, "another run already holds this incident (duplicate delivery)")
             self._services = self._catalog()
@@ -296,16 +297,26 @@ class Orchestrator:
             if not self.store.acquire_lease(lease, run.run_id, self._clock()):
                 return self._to(S.REPORT_ONLY, f"another actor holds the lease on {p.target}")
             try:
-                approved_hash = (run.approval or {}).get("state_hash") if d.verdict == "require_approval" else None
-                ok, why, fresh = self.plane.revalidate(run, p, d, approved_hash)
-                self._log("policy", "revalidation", {"ok": ok, "reason": why, "fresh_verdict": fresh.verdict,
-                                                     "fresh_reasons": fresh.reasons})
-                if not ok:
-                    if fresh.verdict == "deny" or not self._reevaluation_allowed(run):
-                        return self._to(S.REPORT_ONLY, f"re-validation failed: {why}")
-                    self._to(S.POLICY_CHECK, why)
-                    continue
-                ex = self._execute(run, p, d)
+                # Fleet lock: held for seconds, around re-validation and apply only, so fleet-wide budgets and the
+                # cluster-capacity check can't be passed by two runs at once. Lock order is always target, then
+                # fleet, so the two leases can't deadlock.
+                fleet_lock = f"fleet:{run.domain.split('/')[0]}"
+                if not self._acquire_with_wait(fleet_lock, run.run_id):
+                    return self._to(S.REPORT_ONLY, "fleet lock busy: another remediation in this cluster is being "
+                                                   "applied; not waiting longer (humans are paged)")
+                try:
+                    approved_hash = (run.approval or {}).get("state_hash") if d.verdict == "require_approval" else None
+                    ok, why, fresh = self.plane.revalidate(run, p, d, approved_hash)
+                    self._log("policy", "revalidation", {"ok": ok, "reason": why, "fresh_verdict": fresh.verdict,
+                                                         "fresh_reasons": fresh.reasons})
+                    if not ok:
+                        if fresh.verdict == "deny" or not self._reevaluation_allowed(run):
+                            return self._to(S.REPORT_ONLY, f"re-validation failed: {why}")
+                        self._to(S.POLICY_CHECK, why)
+                        continue
+                    ex = self._execute(run, p, d)
+                finally:
+                    self.store.release_lease(fleet_lock, run.run_id)
                 if ex is None:
                     if run.state in S.TERMINAL:
                         return None
@@ -317,6 +328,14 @@ class Orchestrator:
                 return self._verify(run, p, ex)
             finally:
                 self.store.release_lease(lease, run.run_id)
+
+    def _acquire_with_wait(self, name: str, holder: str, attempts: int = 30, pause_s: float = 0.1) -> bool:
+        """Short, bounded wait for a lease that is only ever held for the seconds of a decide-and-apply."""
+        for _ in range(attempts):
+            if self.store.acquire_lease(name, holder, self._clock(), ttl_s=60):
+                return True
+            time.sleep(pause_s)
+        return False
 
     def _request_approval(self, run: RunState, p: Proposal, d: Decision) -> dict:
         owners = d.policy_input.get("target", {}).get("owners") or []
@@ -331,7 +350,8 @@ class Orchestrator:
 
     def _execute(self, run: RunState, p: Proposal, d: Decision) -> dict | None:
         """Apply under the lease. Returns the execution record, or None after a transition (drift or failure)."""
-        self.store.record_action(p.proposal_id, run.run_id, p.target, p.action, self._clock())
+        mode = "approved" if d.verdict == "require_approval" else "auto"
+        self.store.record_action(p.proposal_id, run.run_id, p.target, p.action, self._clock(), mode, run.domain)
         precondition = d.dry_run.precondition_resource_version if d.dry_run else None
         with self._span("asap.execute", {"asap.action": p.action, "asap.target": p.target}):
             try:
@@ -546,7 +566,10 @@ class Orchestrator:
 
 
 def _incident_dict(i: Incident) -> dict:
-    return {"incident_id": i.incident_id, "severity": i.severity, "root_service_candidate": i.root_service,
+    shared = ({"suspected_shared_infrastructure_cause": "many incidents opened in this failure domain at once; the "
+               "root may be shared infrastructure (DNS, mesh, node pool, zone) that the dependency graph doesn't show"}
+              if i.suspected_shared_cause else {})
+    return {**shared, "incident_id": i.incident_id, "severity": i.severity, "root_service_candidate": i.root_service,
             "affected_services": i.services, "cluster": i.cluster, "cell": i.cell,
             "alerts": [{"alertname": a["labels"]["alertname"], "service": a["labels"]["service"],
                         "severity": a["labels"].get("severity"), "startsAt": a["startsAt"],

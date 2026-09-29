@@ -111,6 +111,7 @@ class ControlPlane:
         cited = [run.evidence.get(e) for e in p.evidence_ids]
         valid = bool(p.evidence_ids) and all(cited)
         has_relevant_metric = valid and any(self.relevant_metric(e, p.target) for e in cited)
+        fleet = self.store.fleet(run.domain, now)
         budget = self.store.budget(p.target, now)
         budget["circuit_open"] = self.store.circuit_open(p.target, p.action, now)
         br = blast_radius(p.action, st, upstream, p.params)
@@ -127,6 +128,7 @@ class ControlPlane:
             "evidence": {"valid": valid, "has_relevant_metric": has_relevant_metric, "count": len(p.evidence_ids)},
             "scope": {"in_incident_scope": p.target in scope},
             "budget": budget,
+            "fleet": fleet,
             "controls": {"kill_switch": self.controls.kill_switch, "change_freeze": self.controls.change_freeze},
             "blast_radius": br,
         }

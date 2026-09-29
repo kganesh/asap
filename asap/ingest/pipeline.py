@@ -17,6 +17,9 @@ DEDUP_WINDOW_S = 300
 CORRELATION_WINDOW_S = 120 * 5  # alerts within 10 minutes of each other in one cell may be one incident
 FLAP_LIMIT = 2  # state flips in 10 minutes
 DEBOUNCE_S = 120  # matches the rule's `for: 2m`
+# If this many separate incidents open in one failure domain at once, the dependency graph probably doesn't
+# contain the real cause (DNS, mesh, node pool, zone, provider): flag them so the agent and the policy know.
+SHARED_CAUSE_INCIDENTS = 4
 
 
 def _ts(s: str) -> float:
@@ -34,6 +37,11 @@ class Incident:
     started_at: float
     priority: int
     severity: str
+    suspected_shared_cause: bool = False  # many independent incidents in one failure domain at once
+
+    @property
+    def domain(self) -> str:
+        return f"{self.cluster}/{self.cell}"
 
     @property
     def summary(self) -> str:
@@ -112,8 +120,14 @@ class AlertPipeline:
             by_domain[(cluster, cell)][service].extend(items)
         incidents = []
         for (cluster, cell), svc_alerts in by_domain.items():
-            for component in self._components(set(svc_alerts)):
-                incidents.append(self._incident(cluster, cell, component, svc_alerts))
+            domain_incidents = [self._incident(cluster, cell, component, svc_alerts)
+                                for component in self._components(set(svc_alerts))]
+            if len(domain_incidents) >= SHARED_CAUSE_INCIDENTS:
+                self.stats.notes.append(f"{cluster}/{cell}: {len(domain_incidents)} simultaneous incidents; "
+                                        "suspected shared-infrastructure cause")
+                for i in domain_incidents:
+                    i.suspected_shared_cause = True
+            incidents.extend(domain_incidents)
         self.stats.incidents += len(incidents)
         return sorted(incidents, key=lambda i: (-i.priority, i.started_at))
 

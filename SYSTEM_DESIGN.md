@@ -24,8 +24,9 @@ Safety is layered. Each layer is deterministic and independently testable, and t
 | 10 | **Credential separation.** Only the executor holds write credentials | The agent calling write APIs directly | `test_agent_credential_cannot_write` **[built]** |
 | 11 | **Fail closed.** No policy engine, OPA error or timeout, store unavailable, control-plane context unreadable, alert state unknown before execution: deny | Guardrail outages becoming open doors | attacks `policy_engine_down`, `test_failing_closed_without_any_policy_engine`, `test_state_store_outage_fails_closed` **[built]** |
 | 12 | **Kill switch / change freeze.** `ASAP_KILL_SWITCH=1` forces report-only; freeze forces approval | Operator override during an incident or freeze | attack `kill_switch` **[built]** |
+| 13 | **Fleet-wide blast radius.** At most 2 unattended actions per failure domain (cluster/cell) per 10 min; 4+ incidents in a domain within 10 min pause automation (suspected shared-infrastructure cause); a short fleet lock serializes decide-and-apply so the fleet counts and the capacity check can't be passed twice ([ADR-0011](docs/adr/0011-fleet-wide-blast-radius.md)) | A storm of individually valid actions on different targets during a DNS, mesh or zone outage | attack `fleet_storm`; `tests/test_fleet.py` **[built]** |
 
-`make attack` runs 15 hostile scripted models against these layers; each must end with no unsafe action, and the table shows which layer stopped it.
+`make attack` runs 16 hostile scripted models against these layers; each must end with no unsafe action, and the table shows which layer stopped it.
 
 ---
 
@@ -41,6 +42,8 @@ Safety is layered. Each layer is deterministic and independently testable, and t
 | **3: deny / report** | StatefulSets, databases; rollback across a schema migration; confidence < 0.6; invalid evidence; out-of-scope target; budget or breaker; kill switch | Never executed; incident report + recommendation | Irreversible, or the diagnosis is too weak |
 
 Cache flush is tier 2 on purpose: flushing a hot cache under load shifts that load to the database and can turn a latency incident into an outage.
+
+Tiers are also capped fleet-wide. Once a failure domain has had 2 unattended actions in 10 minutes, or 4+ incidents have opened in it, every further action there needs a human, even one that would otherwise be tier 1 ([ADR-0011](docs/adr/0011-fleet-wide-blast-radius.md)).
 
 ### Blast-radius score (`control/plane.py`)
 

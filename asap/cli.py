@@ -164,7 +164,10 @@ def cmd_storm(a: argparse.Namespace) -> int:
     console.print(t)
     for i in incidents:
         console.print(f"  {i.incident_id}  priority={i.priority}  cell={i.cell}  root=[bold]{i.root_service}[/]  "
-                      f"services={i.services}  alerts={len(i.alerts)}")
+                      f"services={i.services}  alerts={len(i.alerts)}"
+                      + ("  [yellow]suspected shared-infrastructure cause[/]" if i.suspected_shared_cause else ""))
+    for note in stats.notes:
+        console.print(f"  [yellow]{note}[/]")
     cap = capacity_model(max(len(incidents), 1) * 5)
     console.print(f"\nOnly {len(incidents)} LLM runs needed instead of {a.alerts:,}. Capacity model at 5x this rate: {cap}")
     return 0

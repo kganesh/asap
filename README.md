@@ -6,7 +6,7 @@ The design rule behind everything: **the LLM only proposes, and a deterministic 
 
 - [ARCHITECTURE.md](ARCHITECTURE.md): data plane and control plane, the agent state machine, tool contracts, and the choice of reasoning pattern
 - [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md): guardrails, blast radius and human-in-the-loop (HITL), audit, alert storms, measured LLM token cost and capacity, failure modes and consistency
-- [docs/adr](docs/adr/README.md): ten Architecture Decision Records: options considered, decision, trade-offs accepted
+- [docs/adr](docs/adr/README.md): eleven Architecture Decision Records: options considered, decision, trade-offs accepted
 - [docs/live-runs](docs/live-runs/README.md): evidence from live Claude Sonnet 5.5 runs of all three scenarios: reports and verifiable hash-chained audit logs
 
 ---
@@ -46,10 +46,10 @@ make docker-demo          # = docker compose run --rm asap demo --approve auto -
 | Command | What it shows |
 |---|---|
 | `make demo` | Three incidents investigated end to end, one at a time with a pause and recap between them (table below) |
-| `make attack` | 15 adversarial mock "LLMs" try to cause damage (drop the DB, restart-loop, prompt injection, fabricated or irrelevant evidence, and more). Every one is contained, and the table shows which guardrail stopped it |
+| `make attack` | 16 adversarial mock "LLMs" try to cause damage (drop the DB, restart-loop, prompt injection, fabricated or irrelevant evidence, a fleet-wide storm of individually valid actions, and more). Every one is contained, and the table shows which guardrail stopped it |
 | `make storm` | 5,000 alerts in one minute collapse to **2 incidents** (flap suppression, debounce, dedup, dependency-graph correlation) before any LLM token is spent |
 | `make tokens` | Measures the input tokens each run would send to an LLM: typical runs, a worst case, early compaction vs prompt caching, and a tight per-run budget (see ADR-0010) |
-| `make test` | Rego policy unit tests (`opa test`) plus 70 pytest tests covering the guardrails, production edge cases, token controls and code-review regressions |
+| `make test` | Rego policy unit tests (`opa test`) plus 77 pytest tests covering the guardrails, production edge cases, token controls and code-review regressions |
 | `.venv/bin/asap replay <run_id>` | Replays a run from its hash-chained audit log, with no LLM calls, and verifies the chain |
 
 | Scenario | Injected fault | Correct outcome |

@@ -12,6 +12,12 @@ import rego.v1
 
 allowed_actions := {"rollback", "scale", "restart", "cache_flush"}
 
+# Fleet-wide blast radius, per failure domain (cluster/cell) and 10-minute window. Per-target budgets can't see
+# a storm in which many different targets each take "one" action.
+fleet_auto_budget := 2 # unattended actions in the domain before every further action needs a human
+
+storm_incident_threshold := 4 # simultaneous incidents that suggest a shared-infrastructure cause
+
 # ---------------------------------------------------------------- tier 3: deny
 deny contains "action type is not in the allowlist" if {
 	not input.action.type in allowed_actions
@@ -108,6 +114,14 @@ require_approval contains "restart would breach the PodDisruptionBudget or leave
 	not restart_safe
 }
 
+require_approval contains sprintf("fleet auto-remediation budget reached: %v unattended actions in this failure domain in %v min (max %v)", [input.fleet.auto_actions, input.fleet.window_minutes, fleet_auto_budget]) if {
+	input.fleet.auto_actions >= fleet_auto_budget
+}
+
+require_approval contains sprintf("incident storm: %v incidents opened in this failure domain in %v min; suspected shared-infrastructure cause, automation paused", [input.fleet.open_incidents, input.fleet.window_minutes]) if {
+	input.fleet.open_incidents >= storm_incident_threshold
+}
+
 require_approval contains "unattended actions need a cited metric on the target that shows the anomaly" if {
 	input.evidence.has_relevant_metric != true
 }
@@ -115,6 +129,7 @@ require_approval contains "unattended actions need a cited metric on the target 
 restart_safe if {
 	input.target.replicas >= 3
 	input.target.replicas - 1 >= input.target.pdb.minAvailable
+
 	# cluster headroom > 30%, in integer arithmetic
 	free_pods := input.cluster.pods_allocatable - input.cluster.pods_used
 	free_pods * 10 > input.cluster.pods_allocatable * 3

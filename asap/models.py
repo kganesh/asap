@@ -65,6 +65,7 @@ class RunState:
     services: list[str]
     alerts: list[dict]
     llm_name: str
+    domain: str = ""  # failure domain (cluster/cell): the unit for fleet-wide budgets
     state: str = "TRIAGE"
     plan: dict | None = None
     replans: int = 0

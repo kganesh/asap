@@ -61,8 +61,10 @@ def run_storm(now: float, total: int = 5000) -> tuple[FunnelStats, list]:
     return pipe.stats, incidents
 
 
-def capacity_model(incidents_per_min: float, run_seconds: float = 90, tokens_in: int = 40_000,
-                   tokens_out: int = 4_000, workers: int = 20) -> dict:
+def capacity_model(incidents_per_min: float, run_seconds: float = 90, tokens_in: int = 60_000,
+                   tokens_out: int = 2_500, workers: int = 20) -> dict:
+    """Defaults from the live Claude runs (38-61k input tokens processed, 2.1-2.5k output per run; see
+    SYSTEM_DESIGN.md). Input tokens are processed tokens, most of them served from the prompt cache."""
     runs_per_worker_min = 60 / run_seconds
     needed = incidents_per_min / runs_per_worker_min
     return {

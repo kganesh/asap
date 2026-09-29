@@ -16,6 +16,7 @@ base := {
 	"budget": {"actions_last_30m": 0, "actions_last_24h": 0, "circuit_open": false},
 	"controls": {"kill_switch": false, "change_freeze": false},
 	"blast_radius": 25,
+	"fleet": {"window_minutes": 10, "auto_actions": 0, "actions": 0, "open_incidents": 1},
 }
 
 test_scale_up_is_auto if {
@@ -59,4 +60,14 @@ test_irrelevant_evidence_not_auto if {
 
 test_tier0_needs_two_approvers if {
 	remediation.required_approvals == 2 with input as object.union(base, {"target": {"kind": "Deployment", "tier": 0, "replicas": 4, "hpa": {"minReplicas": 4, "maxReplicas": 12}}})
+}
+
+test_fleet_budget_forces_approval if {
+	inp := object.union(base, {"fleet": {"window_minutes": 10, "auto_actions": 2, "actions": 2, "open_incidents": 2}})
+	remediation.decision == "require_approval" with input as inp
+}
+
+test_incident_storm_pauses_automation if {
+	inp := object.union(base, {"fleet": {"window_minutes": 10, "auto_actions": 0, "actions": 0, "open_incidents": 5}})
+	remediation.decision == "require_approval" with input as inp
 }
