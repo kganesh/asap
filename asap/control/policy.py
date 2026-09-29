@@ -68,7 +68,12 @@ class PolicyEngine:
     @property
     def name(self) -> str:
         if self.opa:
-            return f"opa ({self.opa})"
+            # Relative to the repo when bundled, else just the binary name: audit logs and reports get shared, and
+            # an absolute path leaks the local username and directory layout.
+            repo = Path(__file__).resolve().parents[2]
+            p = Path(self.opa)
+            shown = str(p.relative_to(repo)) if p.is_absolute() and repo in p.parents else p.name
+            return f"opa ({shown})"
         if self.regopy:
             return "regopy (rego-cpp)"
         return "none (fail-closed)"
