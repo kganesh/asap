@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Protocol
@@ -28,6 +29,17 @@ log = logging.getLogger(__name__)
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5"
 FALLBACK_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+
+
+# Anthropic docs: Claude Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 return 400 for tool_choice any/tool.
+AUTO_ONLY_MODELS = re.compile(r"claude-(opus|sonnet)-5-5|claude-fable-|claude-mythos-")
+
+
+def initial_tool_choice(model: str) -> str:
+    override = os.environ.get("ASAP_TOOL_CHOICE", "").strip().lower()
+    if override in ("any", "auto"):
+        return override
+    return "auto" if AUTO_ONLY_MODELS.search(model) else "any"
 
 
 class LLMUnavailable(Exception):
@@ -67,7 +79,12 @@ class AnthropicLLM:
         self.client = anthropic.Anthropic(max_retries=2)
         self.model = model or os.environ.get("ASAP_MODEL", DEFAULT_ANTHROPIC_MODEL)
         self.fallback = os.environ.get("ASAP_FALLBACK_MODEL", fallback or "") or None
-        self._tool_choice: dict[str, str] = {}  # model -> "any" | "auto" (learned from the API)
+        # model -> "any" | "auto". Known model families that reject forced tool choice start on "auto" (saves a
+        # failed request per run); anything else is learned from the API's 400. ASAP_TOOL_CHOICE overrides.
+        self._tool_choice: dict[str, str] = {}
+        for m in (self.model, self.fallback):
+            if m:
+                self._tool_choice[m] = initial_tool_choice(m)
 
     @staticmethod
     def to_messages(messages: list[dict], cache_tail: bool = False) -> list[dict]:

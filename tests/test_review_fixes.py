@@ -203,7 +203,7 @@ def test_models_that_reject_forced_tool_choice_fall_back_to_auto_and_nudge():
 
     llm = AnthropicLLM.__new__(AnthropicLLM)
     llm._anthropic, llm.model, llm.fallback = anthropic, "claude-sonnet-5-5", None
-    llm._tool_choice = {}
+    llm._tool_choice = {}  # unknown to the static list: learned from the 400
     llm.client = SimpleNamespace(messages=SimpleNamespace(create=create))
     r = llm.next("sys", [{"role": "user", "text": "x"}], tool_specs(["submit_plan"]), None, "PLAN", 5)
     assert r.tool_name == "submit_plan" and r.thought == "Planning."
@@ -212,3 +212,13 @@ def test_models_that_reject_forced_tool_choice_fall_back_to_auto_and_nudge():
     assert r.tokens_in == 22, "usage is summed across the retries"
     llm.next("sys", [{"role": "user", "text": "x"}], tool_specs(["submit_plan"]), None, "PLAN", 5)
     assert calls[3][0] == "auto", "the fallback to auto is remembered per model"
+
+
+def test_known_auto_only_models_start_on_auto(monkeypatch):
+    from asap.agent.llm import initial_tool_choice
+
+    assert initial_tool_choice("claude-sonnet-5-5") == "auto"
+    assert initial_tool_choice("claude-opus-5-5") == "auto"
+    assert initial_tool_choice("claude-haiku-4-5-20251001") == "any"
+    monkeypatch.setenv("ASAP_TOOL_CHOICE", "any")
+    assert initial_tool_choice("claude-sonnet-5-5") == "any"

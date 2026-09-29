@@ -137,18 +137,23 @@ Correlation roots each incident at the *deepest failing dependency* within a fai
 
 **Tokens per run: one live run plus calibrated estimates.**
 
-*Live, Claude Sonnet 5.5, `bad_deploy`* (exact provider usage from `audit.jsonl`):
+*Live runs, Claude Sonnet 5.5* (exact provider usage from each run's `audit.jsonl`; one run per scenario):
 
-| Metric | Value |
-|---|---|
-| Outcome | Correct diagnosis (bad deploy, confidence 0.95), rollback approved, recovery verified |
-| LLM calls | 7: plan, 3 reads, 2 diagnosis attempts (the first was rejected: `reasoning` exceeded a 600-character cap, since raised to 2,000), 1 proposal |
-| Input tokens processed | 47.5k: 28.2k cache reads, 19.3k cache writes, 16 uncached |
-| Cost-equivalent (cache reads 0.1x, writes 1.25x) | ~27k |
-| Output tokens | 2.4k |
-| LLM wall time | ~22 s total, 1.5–5.5 s per call |
+| Scenario | Outcome | Diagnosis (confidence) | LLM calls | Input processed (cache reads) | Cost-equiv.¹ | Output | LLM time |
+|---|---|---|---|---|---|---|---|
+| `bad_deploy` | RESOLVED: rollback approved by a human, recovery verified | bad deploy of checkout v1.4.2 (0.95) | 7² | 47.5k (28.2k) | ~27k | 2.4k | 22 s |
+| `cpu_throttle` | RESOLVED: tier-1 scale-up 4→8 with no human, recovery verified | payments CPU saturation after a 2.3x traffic surge (0.90) | 9 | 60.5k (42.6k) | ~27k | 2.5k | 27 s |
+| `db_red_herring` | REPORT_ONLY: no action, routed to the DB team | Postgres lock contention; the recent inventory deploy judged config-only and not causal (0.82) | 6 | 38.3k (29.4k) | ~14k | 2.1k | 23 s |
 
-Claude needed 3 read calls where the scripted checklist uses 8. Most cache writes happen on the first call of each phase: the tool set changes between PLAN, INVESTIGATE and PROPOSE, which invalidates the cached prefix.
+¹ Cache reads at 0.1x, cache writes at 1.25x. ² Includes one rejected diagnosis: its `reasoning` exceeded a 600-character cap, since raised to 2,000.
+
+What the live runs showed:
+
+- **All three outcomes matched expectations**, and Claude needed fewer reads than the scripted checklist (3-6 vs 8-10). In `cpu_throttle` it checked request rate first, then ruled out a deploy and downstream latency, before scaling through the HPA.
+- **Policy responded to evidence quality, not just action type.** In `cpu_throttle` Claude cited an anomalous metric on the target, so the scale-up was tier 1. In `bad_deploy` it cited logs, deploys and traces but no metric, so the evidence-relevance rule also required approval (the rollback needed it anyway).
+- **Found on the first attempt:** Claude Opus/Sonnet 5.5 reject forced tool choice (`any`) with a 400. The run failed closed to report-only; the adapter now starts these models on `auto` and nudges once if a reply has no tool call.
+- **Not exercised live:** the replan edge (Claude ranked the database hypothesis first and never needed to replan) and prompt-injection redaction (Claude never read the WARN logs that carry the planted instruction). Both remain covered by the scripted and adversarial suites.
+- **Caveats:** one run per scenario is a smoke test, not an evaluation. The system prompt carries general SRE heuristics (for example, database-dominated latency isn't fixed by rolling back the caller) that suit these scenario classes, so a scored evaluation needs held-out incidents the prompt wasn't written against.
 
 *Estimates, `make tokens`* (deterministic and scripted runs). The estimator was calibrated on the live run: JSON-heavy prompts tokenise at ~2.5 characters per token, not 4, so the original estimates were ~1.6x low.
 

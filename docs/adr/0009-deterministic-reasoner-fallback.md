@@ -25,7 +25,7 @@ The reasoner is **not scenario-aware**: it follows a fixed SRE checklist and app
 
 - `make demo` and CI always run; results are reproducible.
 - The safety claims don't depend on which reasoner runs. The adversarial suite uses a third, hostile, implementation of the same interface.
-- Diagnosis quality with a real model is validated separately: run the scenarios with a key and compare against the expected outcomes. The Claude adapter is covered by tests against a simulated API, not a live call.
+- Diagnosis quality with a real model is validated separately. One live Claude Sonnet 5.5 run per scenario reached the expected outcome in all three (SYSTEM_DESIGN.md), and the first live attempt found a provider incompatibility (forced tool choice rejected) that the simulated-API tests could not. That is a smoke test, not an evaluation.
 
 ## Revisit if
 
