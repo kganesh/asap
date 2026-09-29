@@ -108,8 +108,8 @@ require_approval contains "restart would breach the PodDisruptionBudget or leave
 	not restart_safe
 }
 
-require_approval contains "unattended actions need at least one metric-based evidence ID" if {
-	input.evidence.has_metric != true
+require_approval contains "unattended actions need a cited metric on the target that shows the anomaly" if {
+	input.evidence.has_relevant_metric != true
 }
 
 restart_safe if {

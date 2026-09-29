@@ -12,17 +12,25 @@ submit(proposal) -> Decision:
 
 from __future__ import annotations
 
+import logging
 import os
 
 import httpx
 
 from ..executor.executor import Executor
-from ..models import Decision, DryRun, Proposal, RunState
+from ..models import Decision, DryRun, Evidence, Proposal, RunState
 from ..simclient import SimClient
+from .approval import state_hash
 from .policy import PolicyEngine, PolicyUnavailable
 from .store import StateStore, StoreUnavailable
 
+log = logging.getLogger(__name__)
+
 TIER_WEIGHT = {0: 40, 1: 20, 2: 10}
+
+
+class ContextUnavailable(Exception):
+    pass
 REVERSIBILITY = {"rollback": 15, "cache_flush": 25, "restart": 10, "scale_up": 0, "scale_down": 15}
 
 
@@ -72,16 +80,37 @@ class ControlPlane:
                     frontier.append(d)
         return scope
 
+    @staticmethod
+    def relevant_metric(e: Evidence | None, target: str) -> bool:
+        """A cited metric counts only if it is about the proposal's target AND shows an anomaly.
+
+        Existence alone is not enough: otherwise a model could cite any metric (say, payments CPU) to
+        auto-scale an unrelated service."""
+        if e is None or e.kind != "metric" or e.args.get("service") != target:
+            return False
+        r = e.result
+        base, cur = r.get("baseline"), r.get("current")
+        return r.get("change_point") is not None or (
+            base is not None and cur is not None and cur > max(2 * base, base + 0.02))
+
     def build_input(self, run: RunState, p: Proposal, dry: DryRun) -> tuple[dict, int]:
-        now = self.sim.now()
+        """All context comes from sources the control plane reads itself. Any read failure raises
+        ContextUnavailable, and submit() turns that into a deny: never decide on partial context."""
         try:
+            now = self.sim.now()
             st = self.sim.state(p.target)
             upstream = self.sim.dependencies(p.target)["upstream"]
-        except httpx.HTTPError:
-            st, upstream = {"kind": "Unknown", "tier": 0, "replicas": 0}, []
+            scope = self.incident_scope(run)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                raise ContextUnavailable(f"control-plane context read failed: HTTP {e.response.status_code}") from e
+            st, upstream, scope = {"kind": "Unknown", "tier": 0, "replicas": 0}, [], {run.root_service}
+            now = self.sim.now()
+        except httpx.HTTPError as e:
+            raise ContextUnavailable(f"control-plane context read failed ({type(e).__name__})") from e
         cited = [run.evidence.get(e) for e in p.evidence_ids]
         valid = bool(p.evidence_ids) and all(cited)
-        has_metric = valid and any(e.kind == "metric" for e in cited if e)
+        has_relevant_metric = valid and any(self.relevant_metric(e, p.target) for e in cited)
         budget = self.store.budget(p.target, now)
         budget["circuit_open"] = self.store.circuit_open(p.target, p.action, now)
         br = blast_radius(p.action, st, upstream, p.params)
@@ -95,8 +124,8 @@ class ControlPlane:
             "dry_run": {"ok": dry.ok, "crosses_migration": dry.crosses_migration, "diff": dry.diff,
                         "errors": dry.errors},
             "diagnosis": {"confidence": p.diagnosis_confidence},
-            "evidence": {"valid": valid, "has_metric": has_metric, "count": len(p.evidence_ids)},
-            "scope": {"in_incident_scope": p.target in self.incident_scope(run)},
+            "evidence": {"valid": valid, "has_relevant_metric": has_relevant_metric, "count": len(p.evidence_ids)},
+            "scope": {"in_incident_scope": p.target in scope},
             "budget": budget,
             "controls": {"kill_switch": self.controls.kill_switch, "change_freeze": self.controls.change_freeze},
             "blast_radius": br,
@@ -104,24 +133,34 @@ class ControlPlane:
         return policy_input, br
 
     def submit(self, run: RunState, p: Proposal) -> Decision:
-        dry = self.executor.dry_run(p)
+        try:
+            dry = self.executor.dry_run(p)
+        except httpx.HTTPError as e:
+            log.warning("dry-run failed to reach the cluster: %s", e)
+            return Decision(p.proposal_id, "deny", 3, [f"dry-run could not reach the cluster ({type(e).__name__}): "
+                                                       "failing closed"], 100, None, {}, self.policy.name)
         try:
             policy_input, br = self.build_input(run, p, dry)
-        except StoreUnavailable as e:
+        except (StoreUnavailable, ContextUnavailable) as e:
+            log.warning("denying %s on %s: %s", p.action, p.target, e)
             return Decision(p.proposal_id, "deny", 3, [f"{e}: failing closed"], 100, dry, {}, self.policy.name)
         try:
             out = self.policy.evaluate(policy_input)
         except PolicyUnavailable as e:
+            log.error("policy engine unavailable, denying: %s", e)
             return Decision(p.proposal_id, "deny", 3, [f"policy engine unavailable ({e}): failing closed"], br, dry,
                             policy_input, self.policy.name)
         tier = {"allow": 1, "require_approval": 2, "deny": 3}[out["decision"]]
         reasons = out["deny"] if tier == 3 else out["require_approval"] if tier == 2 else [
-            "within tier-1 bounds: reversible, capacity-safe, metric evidence"]
+            "within tier-1 bounds: reversible, capacity-safe, anomalous metric on the target"]
         return Decision(p.proposal_id, out["decision"], tier, reasons, br, dry, policy_input, self.policy.name,
                         required_approvals=out["required_approvals"] if tier == 2 else 0)
 
-    def revalidate(self, run: RunState, p: Proposal, original: Decision) -> tuple[bool, str, Decision]:
-        """Right before execution: fresh dry-run + fresh policy with fresh context. Any drift or a worse verdict aborts."""
+    def revalidate(self, run: RunState, p: Proposal, original: Decision,
+                   approved_state_hash: str | None = None) -> tuple[bool, str, Decision]:
+        """Right before execution, while holding the target lease: fresh dry-run + fresh policy with fresh
+        context (including the remediation budget). Drift, a worse verdict, or an approval bound to a
+        different state all abort."""
         fresh = self.submit(run, p)
         if fresh.tier > original.tier:
             return False, f"policy verdict worsened since proposal ({original.verdict} -> {fresh.verdict}): " \
@@ -129,4 +168,8 @@ class ControlPlane:
         if original.dry_run and fresh.dry_run and \
                 original.dry_run.precondition_resource_version != fresh.dry_run.precondition_resource_version:
             return False, "target changed since the proposal was approved; approval voided", fresh
+        if approved_state_hash is not None and fresh.dry_run is not None:
+            now_hash = state_hash(p.target, fresh.dry_run.precondition_resource_version, p.params)
+            if now_hash != approved_state_hash:
+                return False, "approval was granted for a different target state; approval voided", fresh
         return True, "preconditions and policy unchanged", fresh

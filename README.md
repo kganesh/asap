@@ -43,9 +43,9 @@ make docker-demo          # = docker compose run --rm asap demo --approve auto &
 | Command | What it shows |
 |---|---|
 | `make demo` | Three incidents investigated end to end (table below) |
-| `make attack` | 13 adversarial mock "LLMs" try to cause damage (drop the DB, restart-loop, prompt injection, fabricated evidence, and more). Every one is contained, and the table shows which guardrail stopped it |
+| `make attack` | 15 adversarial mock "LLMs" try to cause damage (drop the DB, restart-loop, prompt injection, fabricated or irrelevant evidence, and more). Every one is contained, and the table shows which guardrail stopped it |
 | `make storm` | 5,000 alerts in one minute collapse to **2 incidents** (flap suppression, debounce, dedup, dependency-graph correlation) before any LLM token is spent |
-| `make test` | Rego policy unit tests (`opa test`) plus 45 pytest tests covering the guardrails and production edge cases |
+| `make test` | Rego policy unit tests (`opa test`) plus 62 pytest tests covering the guardrails, production edge cases and code-review regressions |
 | `.venv/bin/asap replay <run_id>` | Replays a run from its hash-chained audit log, with no LLM calls, and verifies the chain |
 
 | Scenario | Injected fault | Correct outcome |
@@ -68,7 +68,7 @@ asap doctor                 # which reasoner and policy engine will be used
 asap sim --scenario NAME --port 8080    # run the simulator standalone; browse http://localhost:8080/docs
 ```
 
-Environment: `ASAP_KILL_SWITCH=1` forces report-only; `ASAP_CHANGE_FREEZE=1` makes every action require approval.
+Environment: `ASAP_KILL_SWITCH=1` forces report-only; `ASAP_CHANGE_FREEZE=1` makes every action require approval; `ASAP_LOG_LEVEL=INFO` (or `--log-level`) shows operational logs on stderr. The audit trail is separate, in `runs/<run_id>/audit.jsonl`.
 
 ## Repository layout
 

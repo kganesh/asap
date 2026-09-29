@@ -21,7 +21,7 @@ Option C. The agent has read tools plus four action tools that only create propo
 
 ## Consequences
 
-- Safety can be proven with hostile scripted models (`asap attack`, 13 attacks) rather than argued from prompt wording.
+- Safety can be proven with hostile scripted models (`asap attack`, 15 attacks) rather than argued from prompt wording.
 - The agent can't see or influence the policy input, so it can't argue its way into a better verdict.
 - Extra latency per action (policy evaluation + dry-run + re-validation), well under a second, and negligible next to the verification window.
 - Every new action type needs a schema, a dry-run, policy rules and a revert rule. That friction is deliberate.

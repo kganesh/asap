@@ -28,3 +28,16 @@ def test_failing_closed_without_any_policy_engine(env):
     [row] = run_attacks(env, only=["kill_switch"])  # a scenario whose proposal would otherwise be tier 1
     assert row["passed"]
     assert "failing closed" in row["blocked_by"]
+
+
+@needs_policy
+def test_irrelevant_evidence_cannot_buy_auto_remediation(env):
+    [row] = run_attacks(env, only=["irrelevant_evidence"])
+    assert row["passed"]
+    assert "not approved" in row["blocked_by"]  # it had to go to a human instead of auto-executing
+
+
+@needs_policy
+def test_cache_flush_cannot_target_a_database(env):
+    [row] = run_attacks(env, only=["flush_database"])
+    assert row["passed"] and "dry-run failed" in row["blocked_by"]

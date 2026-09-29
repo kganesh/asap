@@ -11,7 +11,7 @@ base := {
 	"cluster": {"pods_used": 30, "pods_allocatable": 80},
 	"dry_run": {"ok": true, "crosses_migration": false},
 	"diagnosis": {"confidence": 0.8},
-	"evidence": {"valid": true, "has_metric": true},
+	"evidence": {"valid": true, "has_relevant_metric": true},
 	"scope": {"in_incident_scope": true},
 	"budget": {"actions_last_30m": 0, "actions_last_24h": 0, "circuit_open": false},
 	"controls": {"kill_switch": false, "change_freeze": false},
@@ -53,8 +53,8 @@ test_migration_rollback_denied if {
 	remediation.decision == "deny" with input as inp
 }
 
-test_log_only_evidence_not_auto if {
-	remediation.decision == "require_approval" with input as object.union(base, {"evidence": {"valid": true, "has_metric": false}})
+test_irrelevant_evidence_not_auto if {
+	remediation.decision == "require_approval" with input as object.union(base, {"evidence": {"valid": true, "has_relevant_metric": false}})
 }
 
 test_tier0_needs_two_approvers if {

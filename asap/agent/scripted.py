@@ -24,8 +24,10 @@ class DeterministicReasoner:
 
     # ------------------------------------------------------------------ helpers
     def _call(self, name: str, args: dict, thought: str) -> LLMResponse:
+        """Like Claude under forced tool choice, the reasoning travels in the tool's `reasoning` field."""
         self._n += 1
-        return LLMResponse(name, args, f"det_{self._n}", thought, model=self.model)
+        return LLMResponse(name, {"reasoning": thought or f"{name} per checklist", **args}, f"det_{self._n}", "",
+                           model=self.model)
 
     @staticmethod
     def _find(run: RunState, tool: str, **match: object) -> Evidence | None:
@@ -169,13 +171,16 @@ class DeterministicReasoner:
             cur = next(r for r in revs if r["current"])
             prev = next(r for r in revs if r["revision"] < cur["revision"] and r["version"] != cur["version"])
             return self._call("propose_rollback", {"deployment": s, "to_revision": prev["revision"], "evidence_ids": ev,
-                                                   "rationale": f"roll back {cur['version']} -> {prev['version']}"}, "")
+                                                   "rationale": f"roll back {cur['version']} -> {prev['version']}"},
+                              f"Diagnosis is bad_deploy; revision {prev['revision']} ({prev['version']}) is the last "
+                              "known-good revision.")
         if act == "scale":
             st = self._find(run, "get_resource_state", service=s)
             reps = st.result["replicas"] if st else 1
             hpa_max = st.result["hpa"]["maxReplicas"] if st else reps
             want = min(hpa_max, max(reps + 1, math.ceil(reps * 2)))
             return self._call("propose_scale", {"deployment": s, "replicas": want, "evidence_ids": ev,
-                                                "rationale": f"relieve CPU throttling: {reps} -> {want}"}, "")
+                                                "rationale": f"relieve CPU throttling: {reps} -> {want}"},
+                              f"Saturation: doubling replicas within the HPA max ({hpa_max}) should clear throttling.")
         return self._call("no_action", {"reason": d.get("root_cause", "insufficient evidence")[:400]},
                           "Automation would not help; report to the owning team.")

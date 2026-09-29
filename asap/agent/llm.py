@@ -14,6 +14,7 @@ Conversation is kept provider-neutral:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -22,6 +23,8 @@ from typing import Protocol
 import httpx
 
 from ..models import RunState
+
+log = logging.getLogger(__name__)
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5"
 FALLBACK_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
@@ -84,11 +87,12 @@ class AnthropicLLM:
                 out.append({"role": role, "content": blocks})
         return out
 
-    def _call(self, model: str, system: str, messages: list[dict], tools: list[dict], timeout_s: float):  # type: ignore[no-untyped-def]
+    def _call(self, model: str, system: str, messages: list[dict], tools: list[dict], timeout_s: float,  # type: ignore[no-untyped-def]
+              max_tokens: int = 2048):
         tool_defs = [dict(t) for t in tools]
         tool_defs[-1] = {**tool_defs[-1], "cache_control": {"type": "ephemeral"}}
         return self.client.messages.create(
-            model=model, max_tokens=2048,
+            model=model, max_tokens=max_tokens,
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             tools=tool_defs, tool_choice={"type": "any", "disable_parallel_tool_use": True},
             messages=self.to_messages(messages), timeout=timeout_s)
@@ -104,15 +108,24 @@ class AnthropicLLM:
                 resp = self._call(model, system, messages, tools, timeout_s)
                 break
             except (a.APITimeoutError, a.RateLimitError, a.InternalServerError, a.APIConnectionError) as e:
-                last_err = e  # hedge to the fallback model
+                log.warning("Anthropic call to %s failed (%s); hedging to fallback", model, type(e).__name__)
+                last_err = e
             except a.APIStatusError as e:
                 if e.status_code in (429, 500, 502, 503, 529):
+                    log.warning("Anthropic call to %s returned %s; hedging to fallback", model, e.status_code)
                     last_err = e
                     continue
                 raise LLMUnavailable(f"Anthropic API error {e.status_code}: {e.message}") from e
         else:
             raise LLMUnavailable(f"LLM unavailable after fallback: {last_err}")
         tool = next((b for b in resp.content if b.type == "tool_use"), None)
+        if tool is None and getattr(resp, "stop_reason", None) == "max_tokens":
+            log.warning("response truncated before the tool call; retrying once with a larger budget")
+            try:
+                resp = self._call(resp.model, system, messages, tools, timeout_s, max_tokens=4096)
+            except a.APIError as e:
+                raise LLMUnavailable(f"retry after truncation failed: {e}") from e
+            tool = next((b for b in resp.content if b.type == "tool_use"), None)
         if tool is None:
             raise LLMUnavailable("model returned no tool call despite forced tool choice")
         thought = " ".join(b.text for b in resp.content if b.type == "text").strip()

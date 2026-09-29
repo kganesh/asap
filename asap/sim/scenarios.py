@@ -36,10 +36,10 @@ def _base_world(scenario: str) -> World:
                    hpa_min=3, hpa_max=10, pdb_min_available=2,
                    revisions=revs("inventory", [("2.3.0", 6 * DAY, "release 2.3.0")]), current_revision=1))
     w.add(Workload("postgres-inventory", "StatefulSet", 0, ["dba-oncall"], [], 350, 0.02, 1000, 3, http=False,
-                   gitops_managed=False,
+                   gitops_managed=False, role="database",
                    revisions=revs("postgres-inventory", [("15.6", 40 * DAY, "postgres 15.6")]), current_revision=1))
     w.add(Workload("redis-cache", "StatefulSet", 1, ["platform-oncall"], [], 1200, 0.004, 5000, 3, http=False,
-                   gitops_managed=False,
+                   gitops_managed=False, role="cache",
                    revisions=revs("redis-cache", [("7.2.4", 30 * DAY, "redis 7.2.4")]), current_revision=1))
     return w
 

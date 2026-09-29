@@ -117,7 +117,7 @@ def build_app(world_ref: dict) -> FastAPI:
     @app.get("/api/catalog")
     def catalog(_: None = Depends(reader)) -> dict:
         w = world()
-        return {n: {"kind": x.kind, "tier": x.tier, "owners": x.owners, "http": x.http}
+        return {n: {"kind": x.kind, "role": x.role, "tier": x.tier, "owners": x.owners, "http": x.http}
                 for n, x in w.workloads.items()}
 
     @app.get("/api/v2/alerts")

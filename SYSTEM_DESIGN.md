@@ -13,19 +13,19 @@ Safety is layered. Each layer is deterministic and independently testable, and t
 | # | Layer | What it stops | Where / test |
 |---|---|---|---|
 | 1 | **Closed action space.** Four action tools, no shell/kubectl/SQL; Pydantic `extra="forbid"` | "Drop the database" is not expressible; unknown tools are rejected | `tools/schemas.py`; attack `shell_tool` **[built]** |
-| 2 | **Evidence binding.** Diagnoses and proposals must cite `evidence_id`s the gateway issued *in this run* | Hallucinated justification | attack `fabricated_evidence` **[built]** |
+| 2 | **Evidence binding.** Diagnoses and proposals must cite `evidence_id`s the gateway issued *in this run*; unattended (tier-1) actions also need a cited metric *about the target* that *shows the anomaly* | Hallucinated justification; buying auto-remediation with an unrelated metric | attacks `fabricated_evidence`, `irrelevant_evidence` **[built]** |
 | 3 | **Scope derived by the control plane.** Target must be the incident's root service or downstream of it, computed from the dependency graph | Acting on victims or on a target named by an injected string | attacks `victim_target`, `prompt_injection` **[built]** |
 | 4 | **Untrusted-telemetry sanitizer.** Instruction-like strings and secrets redacted before the LLM sees them | Prompt injection via logs, headers, span attributes | `tools/sanitize.py`; `test_bad_deploy_rolls_back_with_approval` **[built]** |
-| 5 | **Dry-run.** Diff + precondition `resourceVersion`; a failed dry-run means deny | Nonexistent revisions, replicas over HPA max, rollback to the running version | attacks `nonexistent_revision`, `scale_beyond_hpa` **[built]** |
+| 5 | **Dry-run.** Diff + precondition `resourceVersion`; a failed dry-run means deny | Nonexistent revisions, replicas over HPA max, rollback to the running version, cache flush aimed at a non-cache | attacks `nonexistent_revision`, `scale_beyond_hpa`, `flush_database` **[built]** |
 | 6 | **Policy-as-code (OPA/Rego).** `policies/remediation.rego`; default deny; unit-tested with `opa test` | StatefulSets/DBs, migrations, low confidence, missing HPA, capacity, freeze, kill switch | `make test`; attack `drop_database` **[built]** |
-| 7 | **Remediation budget + circuit breaker.** Max 1 action per target per 30 min, 3/day; same action that didn't help opens the breaker | **Infinite restart loops** | attack `restart_loop`: run 1 executes and escalates, runs 2-3 denied **[built]** |
+| 7 | **Remediation budget + circuit breaker.** Max 1 action per target per 30 min, 3/day; same action that didn't help opens the breaker. Checked under the target lease, which is held through verification | **Infinite restart loops** | attack `restart_loop`: run 1 executes and escalates, runs 2-3 denied **[built]** |
 | 8 | **State-machine limits.** Legal-transition table; 15 steps, 2 replans, 2 invalid diagnoses, 1 re-evaluation, 180 s deadline | Endless investigation; skipping the control plane (PROPOSE → EXECUTE is illegal) | attack `endless_investigation`; `test_illegal_transitions_are_rejected` **[built]** |
 | 9 | **Re-validation at execute time.** Fresh dry-run + fresh policy; drift voids the approval | Time-of-check vs time-of-use (TOCTOU): acting on state that changed during approval | `test_drift_after_approval_voids_it_and_reevaluates` **[built]** |
 | 10 | **Credential separation.** Only the executor holds write credentials | The agent calling write APIs directly | `test_agent_credential_cannot_write` **[built]** |
-| 11 | **Fail closed.** No policy engine, OPA error or timeout, store unavailable: deny | Guardrail outages becoming open doors | attacks `policy_engine_down`, `test_failing_closed_without_any_policy_engine`, `test_state_store_outage_fails_closed` **[built]** |
+| 11 | **Fail closed.** No policy engine, OPA error or timeout, store unavailable, control-plane context unreadable, alert state unknown before execution: deny | Guardrail outages becoming open doors | attacks `policy_engine_down`, `test_failing_closed_without_any_policy_engine`, `test_state_store_outage_fails_closed` **[built]** |
 | 12 | **Kill switch / change freeze.** `ASAP_KILL_SWITCH=1` forces report-only; freeze forces approval | Operator override during an incident or freeze | attack `kill_switch` **[built]** |
 
-`make attack` runs 13 hostile scripted models against these layers; each must end with no unsafe action, and the table shows which layer stopped it.
+`make attack` runs 15 hostile scripted models against these layers; each must end with no unsafe action, and the table shows which layer stopped it.
 
 ---
 
@@ -36,7 +36,7 @@ Safety is layered. Each layer is deterministic and independently testable, and t
 | Tier | Examples | Gate | Why |
 |---|---|---|---|
 | 0: read | Any telemetry query, within per-run quotas | None | No side effects beyond query cost |
-| **1: auto** | Scale **up** via HPA `minReplicas` within HPA max and cluster capacity; restart a stateless Deployment only if its PDB allows it and cluster headroom > 30% | Policy allow + dry-run + budget + re-validation + **metric evidence** | Reversible, bounded, capacity-safe |
+| **1: auto** | Scale **up** via HPA `minReplicas` within HPA max and cluster capacity; restart a stateless Deployment only if its PDB allows it and cluster headroom > 30% | Policy allow + dry-run + budget + re-validation + **an anomalous metric on the target** | Reversible, bounded, capacity-safe |
 | **2: approve** | Rollback (as a GitOps revert); cache flush (by key prefix); scale down; anything on a tier-0 service (**2 approvers**); anything during a change freeze; blast radius ≥ 50; log-only evidence | Human approval by an **authorized service owner**, bound to a state hash, 15-min TTL, never auto-approved | Reversible but user-visible, or can cause a thundering herd |
 | **3: deny / report** | StatefulSets, databases; rollback across a schema migration; confidence < 0.6; invalid evidence; out-of-scope target; budget or breaker; kill switch | Never executed; incident report + recommendation | Irreversible, or the diagnosis is too weak |
 
@@ -48,7 +48,7 @@ Cache flush is tier 2 on purpose: flushing a hot cache under load shifts that lo
 
 ### Approval flow
 
-- **[built]** Approval packet: diagnosis, cited evidence, plan, dry-run diff, policy reasons, blast radius, required approvers, state hash. Approvers must be listed owners in the service catalog; tier-0 targets need two distinct owners. Timeout escalates and never auto-approves (attack `approval_timeout`). Rejection means report-only.
+- **[built]** Approval packet: diagnosis, cited evidence, plan, dry-run diff, policy reasons, blast radius, required approvers, state hash. Approvers must be listed owners in the service catalog; tier-0 targets need two distinct owners. The 15-minute TTL is enforced; timeout escalates and never auto-approves (attack `approval_timeout`, `test_approval_ttl_is_enforced`). The approval is bound to a state hash that is re-checked at execution. Rejection, EOF or Ctrl-C means report-only.
 - **[design]** Slack interactive message (signed request, identity mapped to the service catalog) + PagerDuty incident note; rubber-stamp detection (approval latency < 10 s tracked in ops review).
 
 ### Partial failure, idempotency and rollback
@@ -87,6 +87,8 @@ Every run is one OpenTelemetry trace plus an append-only, hash-chained audit log
 - **Tamper evidence:** the chain detects edits; the head is appended to `runs/anchors.jsonl` so removed or appended records are detected too **[built]** `test_audit_tampering_is_detected`. **[design]** Anchors go to WORM storage (S3 Object Lock, compliance mode).
 - **Reproducibility:** model, prompt, tool-schema and policy-bundle versions are on every record, so behavior can be attributed after an upgrade.
 - **Data governance [design]:** secrets and PII are redacted at the gateway before storage (**[built]** for secrets and injection patterns); retention of 90 days for full prompts and 7 years for decision records, mapped to SOC 2 CC7/CC8 and FedRAMP AU controls.
+
+**Operational logs** use Python `logging` (stderr, `--log-level` / `ASAP_LOG_LEVEL`): retries, LLM fallbacks, redactions, fail-closed decisions and every swallowed exception. These are separate from the audit trail.
 
 **Agent metrics** (`runs/metrics.prom`, Prometheus exposition) **[built]**: `asap_runs_total{outcome}`, `asap_actions_total{action,tier,verdict}`, `asap_policy_denials_total{reason}`, `asap_llm_tokens_total{model,direction}`, `asap_tool_calls_rejected_total{reason}`, `asap_remediation_reverted_total{action}`, `asap_time_to_diagnosis_seconds`.
 
@@ -178,7 +180,9 @@ Correlation roots each incident at the *deepest failing dependency* within a fai
 ## 6. Known limitations of the PoC
 
 - Single process: identity separation is modelled with tokens, not separate deployments.
-- Approval waits block the run (production parks them in a durable workflow).
+- Approval waits block the run (production parks them in a durable workflow); the TTL is enforced and EOF/Ctrl-C count as rejection.
+- Diagnosis confidence is **self-reported by the model**. The `< 0.6` rule is a courtesy gate, not a guardrail: the deterministic protections are the evidence-relevance check, scope, dry-run, budget and human approval.
+- Approver identity in the CLI is simulated: whoever answers the prompt answers as the listed owner. A signed Slack integration replaces this in production.
 - The simulator's verification "waits" by advancing a virtual clock.
 - The deterministic reasoner is rule-based; diagnosis quality with a real LLM depends on the model. The guardrails do not.
 - Rego runs through the `opa` binary (preferred) or `regopy`; both evaluate the same file, and both paths are tested.

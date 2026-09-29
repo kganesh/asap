@@ -14,7 +14,8 @@ import hashlib
 import random
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+
+from ..timeutil import iso  # noqa: F401  (re-exported for simulator users)
 
 MIN = 60.0
 NAMESPACE = "shop"
@@ -26,10 +27,6 @@ ERROR_RATIO_THRESHOLD = 0.05
 LATENCY_P99_THRESHOLD_S = 1.0
 THROTTLE_THRESHOLD = 0.25
 ALERT_FOR_S = 120  # `for: 2m`
-
-
-def iso(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _noise(*parts: object) -> float:
@@ -64,6 +61,7 @@ class Workload:
     hpa_max: int | None = None
     pdb_min_available: int | None = None
     gitops_managed: bool = True
+    role: str = "service"  # service | database | cache
     revisions: list[Revision] = field(default_factory=list)
     current_revision: int = 1
     resource_version: int = 1
@@ -325,7 +323,7 @@ class World:
     def resource_state(self, s: str) -> dict:
         w = self.workloads[s]
         used = sum(self.replicas_at(x, self.now) for x in self.workloads)
-        return {"name": s, "kind": w.kind, "namespace": NAMESPACE, "tier": w.tier, "owners": w.owners,
+        return {"name": s, "kind": w.kind, "role": w.role, "namespace": NAMESPACE, "tier": w.tier, "owners": w.owners,
                 "replicas": self.replicas_at(s, self.now), "restarts_last_hour": w.restarts,
                 "hpa": None if w.hpa_min is None else {"minReplicas": w.hpa_min, "maxReplicas": w.hpa_max},
                 "pdb": None if w.pdb_min_available is None else {"minAvailable": w.pdb_min_available},

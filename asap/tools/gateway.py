@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import httpx
@@ -15,6 +16,7 @@ from pydantic import ValidationError
 
 from ..models import Evidence, RunState, new_id
 from ..simclient import SimClient
+from ..timeutil import iso
 from .sanitize import sanitize
 from .schemas import ALL_TOOLS, READ_TOOLS
 
@@ -29,6 +31,8 @@ PROMQL = {
     "memory_working_set_bytes": 'sum(container_memory_working_set_bytes{{container="{s}"}})',
     "replicas_available": 'kube_deployment_status_replicas_available{{deployment="{s}"}}',
 }
+log = logging.getLogger(__name__)
+
 MAX_READ_CALLS_PER_RUN = 20
 MAX_RESULT_CHARS = 6000
 
@@ -58,7 +62,6 @@ def summarize_series(values: list[list]) -> dict:
         if all(v > thresh for _, v in pts[i:i + 3]):
             change = pts[i][0]
             break
-    from ..sim.world import iso
     return {
         "baseline": round(base, 4), "current": round(cur, 4), "peak": round(peak, 4), "peak_at": iso(peak_t),
         "change_point": iso(change) if change else None,
@@ -81,6 +84,13 @@ class ToolGateway:
         except ValidationError as e:
             raise ToolRejected(f"invalid arguments for {name}: {e.errors(include_url=False)}") from e
 
+    def is_valid(self, name: str, args: dict) -> bool:
+        try:
+            self.validate(name, args)
+            return True
+        except ToolRejected:
+            return False
+
     def run_read(self, run: RunState, name: str, args: dict) -> ToolResult:
         if name not in READ_TOOLS:
             raise ToolRejected(f"{name} is not a read tool")
@@ -91,17 +101,21 @@ class ToolGateway:
         try:
             kind, raw = getattr(self, f"_{name}")(parsed)
         except httpx.HTTPStatusError as e:
+            log.info("read tool %s rejected by backend: HTTP %s", name, e.response.status_code)
             raise ToolRejected(f"{name} failed: HTTP {e.response.status_code} {e.response.text[:200]}") from e
         except httpx.HTTPError as e:
+            log.warning("telemetry backend unavailable for %s: %s", name, e)
             raise ToolRejected(f"{name} failed: telemetry backend unavailable ({type(e).__name__})") from e
         flags: list[str] = []
         clean = sanitize(raw, flags)
         run.flagged_untrusted.extend(flags)
         eid = new_id("ev")
         if flags:
+            log.warning("redacted %d instruction-like string(s) from %s result", len(flags), name)
             clean["_gateway_note"] = f"{len(flags)} untrusted instruction-like string(s) redacted"
         clean = _truncate(clean)
-        run.evidence[eid] = Evidence(eid, name, kind, parsed.model_dump(), clean, self.sim.now())  # type: ignore[attr-defined]
+        args = parsed.model_dump(exclude={"reasoning"})  # type: ignore[attr-defined]
+        run.evidence[eid] = Evidence(eid, name, kind, args, clean, self.sim.now())
         return ToolResult(True, {"evidence_id": eid, **clean}, eid)
 
     # ------------------------------------------------------------------ implementations

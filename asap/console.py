@@ -60,9 +60,9 @@ class RichUI:
         self.c.print(Text.assemble(("  ▸ ", "dim"), (f"{src} → ", "dim"), (dst, STATE_STYLE.get(dst, "bold")),
                                    (f"  {reason}" if reason else "", "dim")))
 
-    def llm(self, run, phase: str, resp) -> None:  # type: ignore[no-untyped-def]
-        if resp.thought:
-            self.c.print(f"    [italic cyan]thought:[/] {_short(resp.thought, 220)}")
+    def llm(self, run, phase: str, resp, reasoning: str = "") -> None:  # type: ignore[no-untyped-def]
+        if reasoning:
+            self.c.print(f"    [italic cyan]reasoning:[/] {_short(reasoning, 220)}")
         if resp.tool_name in ("submit_plan",):
             for h in resp.tool_args.get("hypotheses", []):
                 self.c.print(f"    [cyan]hypothesis:[/] {h}")
@@ -72,7 +72,8 @@ class RichUI:
                                f"action={a.get('recommended_action')} evidence={a.get('evidence_ids')}[/]",
                                title="Diagnosis", border_style="cyan"))
         elif resp.tool_name.startswith("propose_") or resp.tool_name == "no_action":
-            self.c.print(f"    [bold cyan]proposal:[/] {resp.tool_name} {_short(resp.tool_args, 200)}")
+            args = {k: v for k, v in resp.tool_args.items() if k != "reasoning"}
+            self.c.print(f"    [bold cyan]proposal:[/] {resp.tool_name} {_short(args, 200)}")
         elif self.verbose:
             self.c.print(f"    [cyan]call[/] {resp.tool_name} {_short(resp.tool_args)}")
 

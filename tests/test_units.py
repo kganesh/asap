@@ -40,7 +40,7 @@ BASE = {
                "pdb": {"minAvailable": 3}},
     "cluster": {"pods_used": 30, "pods_allocatable": 80},
     "dry_run": {"ok": True, "crosses_migration": False}, "diagnosis": {"confidence": 0.8},
-    "evidence": {"valid": True, "has_metric": True}, "scope": {"in_incident_scope": True},
+    "evidence": {"valid": True, "has_relevant_metric": True}, "scope": {"in_incident_scope": True},
     "budget": {"actions_last_30m": 0, "actions_last_24h": 0, "circuit_open": False},
     "controls": {"kill_switch": False, "change_freeze": False}, "blast_radius": 25,
 }

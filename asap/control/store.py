@@ -59,13 +59,19 @@ class StateStore:
 
     # ---------------------------------------------------------------- leases (one actor per target)
     def acquire_lease(self, target: str, holder: str, now: float, ttl_s: float = 900) -> bool:
+        """Atomic compare-and-set: take the lease if it is free, expired, or already ours.
+
+        A single conditional UPSERT, so it is correct across processes sharing the database file, not just
+        across threads. (Production: the same statement on Postgres, or an etcd lease.)"""
         self._check()
         with self._lock:
-            row = self.db.execute("SELECT holder, expires FROM leases WHERE target=?", (target,)).fetchone()
-            if row and row[0] != holder and row[1] > now:
-                return False
-            self.db.execute("INSERT OR REPLACE INTO leases VALUES (?,?,?)", (target, holder, now + ttl_s))
-            return True
+            self.db.execute(
+                "INSERT INTO leases (target, holder, expires) VALUES (?, ?, ?) "
+                "ON CONFLICT(target) DO UPDATE SET holder = excluded.holder, expires = excluded.expires "
+                "WHERE leases.expires <= ? OR leases.holder = excluded.holder",
+                (target, holder, now + ttl_s, now))
+            row = self.db.execute("SELECT holder FROM leases WHERE target=?", (target,)).fetchone()
+            return bool(row and row[0] == holder)
 
     def release_lease(self, target: str, holder: str) -> None:
         self.db.execute("DELETE FROM leases WHERE target=? AND holder=?", (target, holder))

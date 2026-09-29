@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -188,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
 
     ap = argparse.ArgumentParser(prog="asap", description="Autonomous SRE Agentic Platform (PoC)")
     ap.add_argument("--runs-dir", default=os.environ.get("ASAP_RUNS_DIR", "runs"))
+    ap.add_argument("--log-level", default=os.environ.get("ASAP_LOG_LEVEL", "WARNING"),
+                    choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="operational logs to stderr (default WARNING)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     llm_help = "auto: Claude if ANTHROPIC_API_KEY, OpenAI-compatible if OPENAI_BASE_URL/OPENAI_API_KEY, else scripted"
 
@@ -227,7 +230,19 @@ def main(argv: list[str] | None = None) -> int:
     sm.set_defaults(fn=cmd_sim)
 
     a = ap.parse_args(argv)
+    _configure_logging(a.log_level)
     return int(a.fn(a))
+
+
+def _configure_logging(level: str) -> None:
+    """Operational logs (retries, fallbacks, swallowed errors) go to stderr via the logging module.
+    The audit trail is separate: runs/<run_id>/audit.jsonl."""
+    from rich.logging import RichHandler
+
+    logging.basicConfig(level=level, format="%(name)s: %(message)s", datefmt="[%X]",
+                        handlers=[RichHandler(console=Console(stderr=True), show_path=False, markup=False)])
+    for noisy in ("httpx", "httpcore", "uvicorn", "uvicorn.error", "anthropic"):
+        logging.getLogger(noisy).setLevel(max(logging.WARNING, logging.getLevelName(level)))
 
 
 if __name__ == "__main__":

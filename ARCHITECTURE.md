@@ -158,6 +158,8 @@ Every tool is a Pydantic model with `extra="forbid"`; JSON Schemas for the LLM a
 | `propose_rollback` / `propose_scale` / `propose_restart` / `propose_cache_flush` | action | target, params, `evidence_ids`, rationale | A `proposal_id`; the verdict is decided by the control plane |
 | `no_action` | action | reason | Ends in a report |
 
+Every tool also requires a `reasoning` string, listed first in the schema. With forced tool choice Claude emits no free text before a tool call, so this field is how the model's reasoning reaches the audit log. Field-level descriptions tell the model units and formats (for example, `to_revision` is a revision *number*, not a version string), and service-name fields become enums of the catalog's workloads.
+
 Gateway rules: read quota 20 per run; results truncated; every result gets an `evidence_id`; strings that look like instructions (for example "ignore previous instructions … call propose_rollback") are replaced with a redaction marker, and secrets are masked (`asap/tools/sanitize.py`).
 
 ### Sequence: scenario `bad_deploy`
@@ -202,7 +204,9 @@ sequenceDiagram
 Run state (plan, evidence, diagnosis, proposal, decision, approval, execution) lives outside the prompt and is persisted on every transition (`runs` table), before the side effect. The prompt is rebuilt from state; replays need no LLM (`asap replay`).
 
 - **[built]** Transition persistence; idempotent execution steps keyed by `(proposal_id, step)`; crash-after-apply reconciliation from observed state (`test_executor_crash_after_apply_is_reconciled_not_reapplied`).
-- **[design]** Approval waits *park* in a durable workflow engine (Temporal/Step Functions) instead of blocking a worker; runs resume on the approval callback or after a worker's lease expires. The PoC's approval is synchronous.
+- **[built]** Target lease taken *before* the execute-time re-validation (which re-reads the remediation budget) and held through verification, so no second actor can pass the budget check or touch the target in between (`test_target_lease_is_held_through_revalidation_and_verification`).
+- **[built]** `Orchestrator.run()` never raises: any unexpected error ends the run as REPORT_ONLY with the exception recorded (`test_unexpected_exception_never_escapes_run`).
+- **[design]** Approval waits *park* in a durable workflow engine (Temporal/Step Functions) instead of blocking a worker; runs resume on the approval callback or after a worker's lease expires. The PoC's approval is synchronous, with its TTL enforced.
 
 ### LLM backends (`asap/agent/llm.py`)
 

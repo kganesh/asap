@@ -11,11 +11,15 @@ It behaves like a reconciler, not a script:
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 
 from ..control.store import StateStore
 from ..models import DryRun, Proposal
 from ..simclient import SimClient
+
+log = logging.getLogger(__name__)
 
 VERIFY_WAIT_MINUTES = 5
 
@@ -72,7 +76,10 @@ class Executor:
                 errors.append("restart is only supported for Deployments")
             diff = {"pods_cycled": st["replicas"], "strategy": "RollingUpdate maxUnavailable=1"}
         elif p.action == "cache_flush":
-            diff = {"cache": p.target, "key_prefix": p.params["key_prefix"]}
+            if st.get("role") != "cache":
+                errors.append(f"{p.target} is a {st.get('role', 'non-cache')} workload, not a cache")
+            else:
+                diff = {"cache": p.target, "key_prefix": p.params["key_prefix"]}
         else:
             errors.append(f"unsupported action {p.action}")
         return DryRun(not errors, diff, rv, crosses, errors)
@@ -87,8 +94,10 @@ class Executor:
         if precondition_rv is not None and st["resourceVersion"] != precondition_rv:
             raise PreconditionFailed(f"{p.target} changed since approval (resourceVersion {precondition_rv} -> "
                                      f"{st['resourceVersion']}); re-evaluation required")
-        self.store.mark_step(p.proposal_id, "apply", "started", {})
-        prev = {"hpa_min": (st.get("hpa") or {}).get("minReplicas"), "revision": st["current_revision"]}
+        prev = {"hpa_min": (st.get("hpa") or {}).get("minReplicas"), "revision": st["current_revision"],
+                "restarts": st.get("restarts_last_hour", 0), "resource_version": st["resourceVersion"]}
+        # Record intent (and the pre-apply state) BEFORE the side effect, so a crash can be reconciled.
+        self.store.mark_step(p.proposal_id, "apply", "started", {"previous": prev})
         if p.action == "rollback":
             res = self.sim.post("/admin/gitops/revert", {"deployment": p.target, "to_revision": p.params["to_revision"]})
         elif p.action == "scale":
@@ -105,17 +114,27 @@ class Executor:
         return {"applied": True, "idempotent_replay": False, **detail}
 
     def recover(self, p: Proposal) -> dict | None:
-        """After a crash: a step left 'started' is reconciled by reading actual state, never re-applied blindly."""
+        """After a crash: a step left 'started' is reconciled from observed state, never re-applied blindly.
+
+        If the effect can't be observed (cache flush), assume it happened: re-applying is the riskier error."""
         s = self.store.step_status(p.proposal_id, "apply")
         if not s or s["status"] != "started":
             return None
+        prev = s["detail"].get("previous", {})
         st = self.sim.state(p.target)
-        applied = {
-            "rollback": lambda: any(r["current"] and "(asap)" in r["change_cause"] for r in self.sim.history(p.target)),
-            "scale": lambda: (st.get("hpa") or {}).get("minReplicas") == p.params.get("replicas"),
-        }.get(p.action, lambda: False)()
-        detail = {"reconciled": True, "observed_applied": applied}
-        self.store.mark_step(p.proposal_id, "apply", "done" if applied else "failed", detail)
+        if p.action == "rollback":
+            applied: bool | None = any(r["current"] and "(asap)" in r["change_cause"] for r in self.sim.history(p.target))
+        elif p.action == "scale":
+            applied = (st.get("hpa") or {}).get("minReplicas") == p.params.get("replicas")
+        elif p.action == "restart":
+            applied = st.get("restarts_last_hour", 0) > prev.get("restarts", 0)
+        else:
+            applied = None  # not observable
+        treated_as_applied = applied is not False
+        detail = {"reconciled": True, "observed_applied": applied, "treated_as_applied": treated_as_applied,
+                  "previous": prev}
+        self.store.mark_step(p.proposal_id, "apply", "done" if treated_as_applied else "failed", detail)
+        log.warning("reconciled crashed apply of %s on %s: observed_applied=%s", p.action, p.target, applied)
         return detail
 
     # ------------------------------------------------------------------ verify / revert
