@@ -31,7 +31,9 @@ SERVICE_FIELDS = ("service", "deployment", "cache", "root_service")
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    reasoning: str = Field(min_length=1, max_length=600,
+    # Generous on purpose: in the first live run Claude wrote a 666-character justification for its diagnosis,
+    # and a tight cap only costs a retry. The audit log keeps it verbatim; the console truncates for display.
+    reasoning: str = Field(min_length=1, max_length=2000,
                            description="Why you are making this call, citing what you have observed so far. "
                                        "Recorded verbatim in the audit log.")
 

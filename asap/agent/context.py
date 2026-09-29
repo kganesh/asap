@@ -21,7 +21,10 @@ import json
 
 from ..models import RunState
 
-CHARS_PER_TOKEN = 4  # conservative estimate for JSON-heavy English text; providers report exact usage
+# Calibrated against the first live Claude run: prompts are mostly JSON (tool schemas, tool results), which
+# tokenises more densely than prose. chars/4 under-counted real prompt size by ~1.6x; chars/2.5 matches it.
+# Budget accounting uses the provider's exact usage whenever it is reported; this only drives projections.
+CHARS_PER_TOKEN = 2.5
 
 
 class TokenBudgetExceeded(Exception):
@@ -32,7 +35,7 @@ def estimate_tokens(*parts: object) -> int:
     n = 0
     for p in parts:
         n += len(p) if isinstance(p, str) else len(json.dumps(p, default=str))
-    return n // CHARS_PER_TOKEN + 1
+    return int(n / CHARS_PER_TOKEN) + 1
 
 
 def digest_result(tool: str, r: dict) -> str:

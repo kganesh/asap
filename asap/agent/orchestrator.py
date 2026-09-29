@@ -191,6 +191,7 @@ class Orchestrator:
                 run.diagnosis = diag
                 m.TIME_TO_DIAGNOSIS.observe(time.time() - run.started_wall)
                 self._log("agent", "diagnosis", diag)
+                self.ui.diagnosis(run, diag)
                 self._tool_ok(resp, {"status": "diagnosis recorded"}, prompts.PHASE_PROPOSE)
                 self._to(S.DIAGNOSE, f"{diag['category']} (confidence {diag['confidence']:.2f})")
                 break
@@ -413,6 +414,7 @@ class Orchestrator:
         self._log("agent", "llm_turn", {"phase": phase, "tool": resp.tool_name, "args": resp.tool_args,
                                         "reasoning": reasoning, "context_tokens_est": context_tokens,
                                         "tokens_in": resp.tokens_in, "cache_read_tokens": resp.cache_read_tokens,
+                                        "cache_write_tokens": resp.cache_write_tokens,
                                         "tokens_out": resp.tokens_out, "latency_ms": round(resp.latency_ms, 1)})
         self.ui.llm(run, phase, resp, reasoning)
         return resp

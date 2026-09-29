@@ -102,8 +102,8 @@ tests/          scenarios, adversarial attacks, production edge cases, unit test
 | CLI approval prompt | Slack interactive message (signed) + PagerDuty note, ownership from the service catalog |
 | Audit anchors in `runs/anchors.jsonl` | Chain heads anchored to WORM storage (S3 Object Lock) |
 | Verification "waits" by advancing a virtual clock | Real wall-clock verification window |
-| Token figures in `make tokens` are estimates (chars/4) from the deterministic reasoner | Provider-reported usage per call, already logged in `audit.jsonl` on live runs; capacity model re-derived from those |
-| Demos and CI use the deterministic reasoner; no scored live-model evaluation yet | Offline evaluation set of replayed incidents scoring diagnosis accuracy per model and prompt version, gating upgrades and any tier-1 autonomy |
+| Token figures in `make tokens` are estimates from the deterministic reasoner, calibrated against one live Claude run (see SYSTEM_DESIGN.md) | Provider-reported usage per call, already logged in `audit.jsonl` on live runs; capacity model re-derived from those |
+| Demos and CI use the deterministic reasoner; one live Claude Sonnet 5.5 run of `bad_deploy` so far (correct diagnosis and recovery), no scored evaluation set yet | Offline evaluation set of replayed incidents scoring diagnosis accuracy per model and prompt version, gating upgrades and any tier-1 autonomy |
 
 ## Troubleshooting
 

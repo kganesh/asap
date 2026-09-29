@@ -67,15 +67,17 @@ class RichUI:
             for h in resp.tool_args.get("hypotheses", []):
                 self.c.print(f"    [cyan]hypothesis:[/] {h}")
         elif resp.tool_name == "submit_diagnosis":
-            a = resp.tool_args
-            self.c.print(Panel(f"{a.get('root_cause')}\n[dim]category={a.get('category')} confidence={a.get('confidence')} "
-                               f"action={a.get('recommended_action')} evidence={a.get('evidence_ids')}[/]",
-                               title="Diagnosis", border_style="cyan"))
+            pass  # shown by diagnosis() only once the orchestrator has accepted it
         elif resp.tool_name.startswith("propose_") or resp.tool_name == "no_action":
             args = {k: v for k, v in resp.tool_args.items() if k != "reasoning"}
             self.c.print(f"    [bold cyan]proposal:[/] {resp.tool_name} {_short(args, 200)}")
         elif self.verbose:
             self.c.print(f"    [cyan]call[/] {resp.tool_name} {_short(resp.tool_args)}")
+
+    def diagnosis(self, run, a: dict) -> None:  # type: ignore[no-untyped-def]
+        self.c.print(Panel(f"{a.get('root_cause')}\n[dim]category={a.get('category')} confidence={a.get('confidence')} "
+                           f"action={a.get('recommended_action')} evidence={a.get('evidence_ids')}[/]",
+                           title="Diagnosis", border_style="cyan"))
 
     def tool(self, run, name: str, args: dict, result: dict) -> None:  # type: ignore[no-untyped-def]
         self.c.print(f"    [green]{result.get('evidence_id')}[/] {name}: {_short(_result_line(name, result), 190)}")
@@ -121,6 +123,7 @@ class RichUI:
         self.c.print(Panel.fit(
             f"[{style}]{run.outcome}[/]: {run.outcome_reason}\n"
             f"steps={run.steps} tool_calls={run.tool_calls} input tokens={run.budget_tokens_in:,} "
+            f"(cache reads {run.tokens_cache_read:,}) "
             f"(peak context {run.peak_context_tokens:,}, compactions {run.compactions}) output={run.tokens_out:,} "
             f"untrusted strings redacted={len(run.flagged_untrusted)}\n"
             f"report: {report}\naudit:  {report.parent / 'audit.jsonl'}   replay: asap replay {run.run_id}",

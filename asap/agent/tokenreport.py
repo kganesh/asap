@@ -33,8 +33,8 @@ class Measured:
     seen_compacted: int = 0
 
     def record(self, system: str, tools: list[dict], messages: list[dict]) -> None:
-        prefix = (len(system) + len(json.dumps(tools))) // CHARS_PER_TOKEN
-        total = prefix + len(json.dumps(messages)) // CHARS_PER_TOKEN
+        prefix = int((len(system) + len(json.dumps(tools))) / CHARS_PER_TOKEN)
+        total = prefix + int(len(json.dumps(messages)) / CHARS_PER_TOKEN)
         compacted = sum(1 for m in messages if m.get("compacted"))
         if compacted > self.seen_compacted:  # history was rewritten before this call
             self.compacted_at.add(len(self.prompts))
