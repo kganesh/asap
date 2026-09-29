@@ -45,6 +45,13 @@ Cache flush is tier 2 on purpose: flushing a hot cache under load shifts that lo
 
 Tiers are also capped fleet-wide. Once a failure domain has had 2 unattended actions in 10 minutes, or 4+ incidents have opened in it, every further action there needs a human, even one that would otherwise be tier 1 ([ADR-0011](docs/adr/0011-fleet-wide-blast-radius.md)).
 
+The numbers in this section are defaults, each with one owner ([ADR-0012](docs/adr/0012-one-home-per-number.md)):
+
+- **Thresholds** are named constants in `remediation.rego`: confidence 0.6, 1 action per target per short window and 3 per long window, blast radius 50, restart headroom 30%, fleet budget 2, storm threshold 4.
+- **Windows and TTLs** are operational settings in `asap/config.py`: budget windows of 30 min and 24 h, the 10-min fleet window, the 15-min approval TTL and lease TTLs. The control plane passes the windows into the policy input, and denial messages echo them.
+
+The prompt and the alert pipeline read the thresholds from the policy, so they cannot disagree with it.
+
 ### Blast-radius score (`control/plane.py`)
 
 `score = tier weight (tier0 40 / tier1 20 / tier2 10) + reversibility (scale-up 0, restart 10, rollback 15, scale-down 15, cache flush 25) + 5 × upstream dependents (max 20) + 15 if every pod is cycled`. A score ≥ 50 requires approval. Examples from the demo: `payments` scale-up = 25 (auto); `checkout` rollback = 40 (approval, because rollback is always tier 2); `checkout` restart = 50 (approval).
@@ -88,7 +95,7 @@ Every run is one OpenTelemetry trace plus an append-only, hash-chained audit log
 
 - **Why did it do that?** The `llm_turn` records hold the model's stated thought and tool call; `decision` holds the exact policy input and the rules that fired; `approval` holds who approved which state hash. `asap replay <run_id>` prints the timeline and verifies the chain.
 - **Tamper evidence:** the chain detects edits; the head is appended to `runs/anchors.jsonl` so removed or appended records are detected too **[built]** `test_audit_tampering_is_detected`. **[design]** Anchors go to WORM storage (S3 Object Lock, compliance mode).
-- **Reproducibility:** model, prompt, tool-schema and policy-bundle versions are on every record, so behavior can be attributed after an upgrade.
+- **Reproducibility:** model, prompt, tool-schema and policy-bundle versions are on every record, so behavior can be attributed after an upgrade. The `run_started` record also holds the run limits, the control and execution settings and the policy's threshold constants in effect, so a decision can be re-checked with the values it was made under.
 - **Data governance [design]:** secrets and PII are redacted at the gateway before storage (**[built]** for secrets and injection patterns); retention of 90 days for full prompts and 7 years for decision records, mapped to SOC 2 CC7/CC8 and FedRAMP AU controls.
 
 **Operational logs** use Python `logging` (stderr, `--log-level` / `ASAP_LOG_LEVEL`): retries, LLM fallbacks, redactions, fail-closed decisions and every swallowed exception. These are separate from the audit trail.
@@ -226,3 +233,5 @@ Two findings shaped the design ([ADR-0010](docs/adr/0010-context-caching-over-co
 - The simulator's verification "waits" by advancing a virtual clock.
 - The deterministic reasoner is rule-based; diagnosis quality with a real LLM depends on the model. The guardrails do not.
 - Rego runs through the `opa` binary (preferred) or `regopy`; both evaluate the same file, and both paths are tested.
+- Settings are read once at startup (`Settings.from_env()`). Changing a window or budget needs a restart; in production, `ControlSettings` and the kill switch move behind the control-plane config service.
+- The incident lease (15 min) and the approval TTL (15 min) are equal, so a run that waits the full TTL for approval can outlive its incident lease. A redelivered alert could then start a duplicate run for the same incident. Fix: renew the lease while waiting, or size it to deadline + approval TTL + verification.

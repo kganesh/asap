@@ -82,10 +82,11 @@ The only path from the data plane to anything with write access is a **typed pro
 | Orchestrator (`asap/agent/orchestrator.py`) | Bounded state machine around the LLM; persists every transition before its side effect | none (talks to gateway and proposal API) | **[built]** | Durable workflow (Temporal) |
 | Tool gateway (`asap/tools`) | Validates calls, runs read tools, summarizes, redacts, issues evidence IDs, enforces quotas | **read-only** | **[built]** | Same, as a sidecar |
 | Control plane (`asap/control/plane.py`) | Evidence and scope checks, context fetch, dry-run, blast radius, policy, re-validation | read + lease store | **[built]** | Separate service |
-| Policy (`policies/remediation.rego`) | Single source of truth for allow / approve / deny | none | **[built]** OPA binary or regopy; fail-closed | OPA sidecar with signed bundles |
+| Policy (`policies/remediation.rego`) | Single source of truth for allow / approve / deny, and for every threshold (named constants the prompt and pipeline read) | none | **[built]** OPA binary or regopy; fail-closed | OPA sidecar with signed bundles |
 | Approval gate (`asap/control/approval.py`) | Owner authorization, 2 approvers for tier-0, state-bound approvals, TTL | Slack app | **[built]** CLI | **[design]** Slack + PagerDuty |
 | Executor (`asap/executor`) | Only component that writes: dry-run, precondition, idempotent apply, crash reconcile, verify, revert | **write** | **[built]** | ServiceAccount per namespace + GitOps token |
 | Audit + telemetry (`asap/audit`, `asap/telemetry`) | Hash-chained audit, anchors, OTel spans, Prometheus metrics | append-only | **[built]** JSONL files | WORM object store, OTLP collector |
+| Settings (`asap/config.py`) | Typed operational settings (run caps, windows, TTLs, timeouts, models), read once at startup and passed to each component; thresholds stay in the policy ([ADR-0012](docs/adr/0012-one-home-per-number.md)) | none | **[built]** defaults + `ASAP_*` overrides | Control-plane config service for runtime changes |
 
 ### Enforcing the boundary (identity, not code layout)
 
