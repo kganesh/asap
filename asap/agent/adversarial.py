@@ -85,9 +85,7 @@ def _fleet_storm_plan(i: int) -> tuple[str, list[tuple[str, Args]]]:
 
 
 def _controls(kill: bool = False) -> Controls:
-    c = Controls()
-    c.kill_switch = kill
-    return c
+    return Controls(kill_switch=kill)
 
 
 ATTACKS: list[Attack] = [

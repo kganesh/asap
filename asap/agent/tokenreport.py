@@ -2,7 +2,8 @@
 
 Wraps the deterministic reasoner (typical runs) and a scripted verbose investigator (worst case) and
 records the full prompt each call would carry: system + tool schemas + conversation. Token counts are
-estimates (chars / 4); a live run records the provider's exact usage in the audit log instead.
+estimates (chars / CHARS_PER_TOKEN, calibrated on a live run); a live run records the provider's exact usage
+in the audit log instead.
 
 The cost-equivalent column models Anthropic prompt caching: a cached prefix is billed at 0.1x, newly
 written context at 1.25x. Without compaction each turn reads the previous turn's prompt from cache; a
@@ -22,7 +23,7 @@ from .context import CHARS_PER_TOKEN
 from .scripted import DeterministicReasoner
 from .states import Limits
 
-CACHE_READ, CACHE_WRITE = 0.1, 1.25
+CACHE_READ, CACHE_WRITE = 0.1, 1.25  # Anthropic prompt-caching price multipliers vs. uncached input
 
 
 @dataclass

@@ -16,11 +16,13 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from .. import __version__
 from ..audit.log import AuditLog
+from ..config import Settings
 from ..console import NullUI
 from ..control.approval import ApprovalGate, state_hash
 from ..control.plane import ControlPlane, Controls
@@ -30,6 +32,7 @@ from ..executor.executor import Executor, PreconditionFailed
 from ..ingest.pipeline import Incident
 from ..models import Decision, Proposal, RunState, new_id
 from ..report import write_report
+from ..signals import SUSPECT_DEPLOY_WINDOW_MIN
 from ..simclient import SimClient
 from ..telemetry import metrics as m
 from ..telemetry.tracing import register_run, unregister_run
@@ -44,8 +47,6 @@ from .llm import LLM, LLMResponse, LLMUnavailable
 log = logging.getLogger(__name__)
 
 INVESTIGATE_TOOLS = list(READ_TOOLS) + ["submit_plan", "submit_diagnosis"]
-MAX_PLAN_ATTEMPTS = 2
-MAX_PROPOSAL_ATTEMPTS = 2
 
 
 class DeadlineExceeded(Exception):
@@ -55,19 +56,23 @@ class DeadlineExceeded(Exception):
 class Orchestrator:
     def __init__(self, sim_url: str, llm: LLM, store: StateStore, policy: PolicyEngine, approval: ApprovalGate,
                  runs_dir: Path, ui: Any | None = None, controls: Controls | None = None,
-                 limits: S.Limits | None = None) -> None:
+                 limits: S.Limits | None = None, settings: Settings | None = None) -> None:
+        self.settings = settings or Settings()
         self.llm = llm
         self.store = store
         self.policy = policy
         self.approval = approval
         self.runs_dir = runs_dir
         self.ui = ui or NullUI()
-        self.limits = limits or S.Limits()
-        self.gateway = ToolGateway(sim_url)
-        self.executor = Executor(sim_url, store)
-        self.plane = ControlPlane(sim_url, store, self.executor, policy, controls)
+        self.limits = limits or self.settings.limits
+        self.exec_settings = self.settings.execution
+        self.gateway = ToolGateway(sim_url, self.limits)
+        self.executor = Executor(sim_url, store, self.exec_settings)
+        self.plane = ControlPlane(sim_url, store, self.executor, policy, controls, self.settings.control)
         self.sim = SimClient.reader(sim_url)
         self.tracer = tracer_setup()
+        self.system_prompt = prompts.system_prompt(self.limits.max_replans,
+                                                   policy.constants.get("min_diagnosis_confidence"))
 
     # ================================================================== entry point
     def run(self, incident: Incident) -> RunState:
@@ -90,7 +95,11 @@ class Orchestrator:
                 "asap.root_service": incident.root_service, "asap.llm": run.llm_name}) as span:
             trace_id = span.get_span_context().trace_id
             register_run(trace_id, audit.dir / "spans.jsonl")
-            self._log("system", "run_started", {"incident": _incident_dict(incident), "limits": vars(self.limits)})
+            st = self.settings
+            self._log("system", "run_started", {
+                "incident": _incident_dict(incident), "limits": asdict(self.limits),
+                "settings": {"control": asdict(st.control), "execution": asdict(st.execution)},
+                "policy_constants": self.policy.constants})
             try:
                 self._drive(run, incident)
             except DeadlineExceeded:
@@ -140,7 +149,8 @@ class Orchestrator:
             if self._firing(run) is False:  # unknown -> proceed: this gate is detection-side
                 return self._to(S.REPORT_ONLY, "alerts resolved before investigation started")
             self.store.record_incident(run.incident_id, run.domain, incident.started_at)
-            if not self.store.acquire_lease(f"incident:{run.incident_id}", run.run_id, self._clock()):
+            if not self.store.acquire_lease(f"incident:{run.incident_id}", run.run_id, self._clock(),
+                                            self.exec_settings.incident_lease_ttl_s):
                 return self._to(S.REPORT_ONLY, "another run already holds this incident (duplicate delivery)")
             self._services = self._catalog()
             hints = self._runbook_hints(run)
@@ -150,12 +160,12 @@ class Orchestrator:
         self._to(S.PLAN, "incident admitted")
 
         # ---------------------------------------------------------- PLAN
-        for _ in range(MAX_PLAN_ATTEMPTS):
+        for _ in range(self.limits.max_plan_attempts):
             resp = self._ask(S.PLAN, ["submit_plan"])
             if self._record_plan(resp):
                 break
         else:
-            return self._to(S.REPORT_ONLY, f"no valid plan after {MAX_PLAN_ATTEMPTS} attempts")
+            return self._to(S.REPORT_ONLY, f"no valid plan after {self.limits.max_plan_attempts} attempts")
         self._to(S.INVESTIGATE, "plan recorded")
 
         # ---------------------------------------------------------- INVESTIGATE (bounded ReAct)
@@ -224,7 +234,7 @@ class Orchestrator:
         return diag, ""
 
     def _propose(self, run: RunState) -> Proposal | None:
-        for _ in range(MAX_PROPOSAL_ATTEMPTS):
+        for _ in range(self.limits.max_proposal_attempts):
             resp = self._ask(S.PROPOSE, list(ACTION_TOOLS))
             if resp.tool_name == "no_action":
                 self._log("agent", "no_action", resp.tool_args)
@@ -247,7 +257,7 @@ class Orchestrator:
             self._tool_ok(resp, {"proposal_id": proposal.proposal_id,
                                  "status": "submitted to the control plane; the agent's part is complete"})
             return proposal
-        self._to(S.REPORT_ONLY, f"no valid proposal after {MAX_PROPOSAL_ATTEMPTS} attempts")
+        self._to(S.REPORT_ONLY, f"no valid proposal after {self.limits.max_proposal_attempts} attempts")
         return None
 
     # ================================================================== deterministic tail
@@ -294,7 +304,7 @@ class Orchestrator:
                 return self._to(S.REPORT_ONLY, "cannot confirm alert state before execution; failing closed")
             if not firing:
                 return self._to(S.REPORT_ONLY, "alerts self-resolved before execution; nothing to do")
-            if not self.store.acquire_lease(lease, run.run_id, self._clock()):
+            if not self.store.acquire_lease(lease, run.run_id, self._clock(), self.exec_settings.target_lease_ttl_s):
                 return self._to(S.REPORT_ONLY, f"another actor holds the lease on {p.target}")
             try:
                 # Fleet lock: held for seconds, around re-validation and apply only, so fleet-wide budgets and the
@@ -329,12 +339,13 @@ class Orchestrator:
             finally:
                 self.store.release_lease(lease, run.run_id)
 
-    def _acquire_with_wait(self, name: str, holder: str, attempts: int = 30, pause_s: float = 0.1) -> bool:
+    def _acquire_with_wait(self, name: str, holder: str) -> bool:
         """Short, bounded wait for a lease that is only ever held for the seconds of a decide-and-apply."""
-        for _ in range(attempts):
-            if self.store.acquire_lease(name, holder, self._clock(), ttl_s=60):
+        cfg = self.exec_settings
+        for _ in range(cfg.fleet_lock_wait_attempts):
+            if self.store.acquire_lease(name, holder, self._clock(), cfg.fleet_lock_ttl_s):
                 return True
-            time.sleep(pause_s)
+            time.sleep(cfg.fleet_lock_wait_pause_s)
         return False
 
     def _request_approval(self, run: RunState, p: Proposal, d: Decision) -> dict:
@@ -402,16 +413,16 @@ class Orchestrator:
             raise DeadlineExceeded()
         run = self._run
         specs = tool_specs(tools, self._services)
-        compaction = self._ctx.maybe_compact(prompts.SYSTEM, specs, self._messages, run)
+        compaction = self._ctx.maybe_compact(self.system_prompt, specs, self._messages, run)
         if compaction:
             run.compactions += 1
             self._log("system", "context_compacted", compaction)
-        context_tokens = estimate_tokens(prompts.SYSTEM, specs, self._messages)
+        context_tokens = estimate_tokens(self.system_prompt, specs, self._messages)
         run.peak_context_tokens = max(run.peak_context_tokens, context_tokens)
         self._ctx.check_budget(run, context_tokens)  # raises TokenBudgetExceeded before spending
         with self._span("gen_ai.chat", {"gen_ai.system": self.llm.name, "gen_ai.request.model": self.llm.model,
                                         "asap.phase": phase, "asap.context_tokens_est": context_tokens}) as sp:
-            resp = self.llm.next(prompts.SYSTEM, self._messages, specs, run, phase,
+            resp = self.llm.next(self.system_prompt, self._messages, specs, run, phase,
                                  min(self.limits.llm_call_timeout_s, remaining))
             sp.set_attribute("gen_ai.usage.input_tokens", resp.tokens_in)
             sp.set_attribute("gen_ai.usage.output_tokens", resp.tokens_out)
@@ -499,7 +510,7 @@ class Orchestrator:
         try:
             return [f"RB-017 bad-deploy signature: {run.root_service} revision {r['revision']} deployed "
                     f"{r['age_minutes']} min ago" for r in self.sim.history(run.root_service)
-                    if r["current"] and r["age_minutes"] <= 15]
+                    if r["current"] and r["age_minutes"] <= SUSPECT_DEPLOY_WINDOW_MIN]
         except Exception as e:  # noqa: BLE001 - hints are optional
             log.warning("runbook hints unavailable for %s: %s", run.root_service, e)
             return []

@@ -13,7 +13,7 @@ base := {
 	"diagnosis": {"confidence": 0.8},
 	"evidence": {"valid": true, "has_relevant_metric": true},
 	"scope": {"in_incident_scope": true},
-	"budget": {"actions_last_30m": 0, "actions_last_24h": 0, "circuit_open": false},
+	"budget": {"actions_short_window": 0, "actions_long_window": 0, "short_window_minutes": 30, "long_window_minutes": 1440, "circuit_open": false},
 	"controls": {"kill_switch": false, "change_freeze": false},
 	"blast_radius": 25,
 	"fleet": {"window_minutes": 10, "auto_actions": 0, "actions": 0, "open_incidents": 1},
@@ -38,7 +38,7 @@ test_low_confidence_denied if {
 }
 
 test_budget_denied if {
-	inp := object.union(base, {"budget": {"actions_last_30m": 1, "actions_last_24h": 1, "circuit_open": false}})
+	inp := object.union(base, {"budget": {"actions_short_window": 1, "actions_long_window": 1, "short_window_minutes": 30, "long_window_minutes": 1440, "circuit_open": false}})
 	remediation.decision == "deny" with input as inp
 }
 

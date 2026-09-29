@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..config import Limits  # noqa: F401 - run caps live with the other settings; re-exported for callers
+
 TRIAGE = "TRIAGE"
 PLAN = "PLAN"
 INVESTIGATE = "INVESTIGATE"
@@ -39,17 +41,3 @@ def check(src: str, dst: str) -> None:
     if dst not in ALLOWED.get(src, set()):
         raise IllegalTransition(f"{src} -> {dst} is not a legal transition")
 
-
-class Limits:
-    def __init__(self, max_steps: int = 15, max_replans: int = 2, deadline_s: float = 180.0,
-                 llm_call_timeout_s: float = 60.0, max_reevaluations: int = 1, max_invalid_diagnoses: int = 2,
-                 max_run_input_tokens: int = 200_000, compact_at_tokens: int = 16_000, keep_recent_results: int = 3) -> None:
-        self.max_steps = max_steps
-        self.max_replans = max_replans
-        self.deadline_s = deadline_s
-        self.llm_call_timeout_s = llm_call_timeout_s
-        self.max_reevaluations = max_reevaluations
-        self.max_invalid_diagnoses = max_invalid_diagnoses
-        self.max_run_input_tokens = max_run_input_tokens  # billed input across all calls in one run
-        self.compact_at_tokens = compact_at_tokens  # context size that triggers compaction of older results
-        self.keep_recent_results = keep_recent_results  # tool results always kept verbatim

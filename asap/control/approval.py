@@ -17,9 +17,9 @@ import sys
 import threading
 from collections.abc import Callable
 
-log = logging.getLogger(__name__)
+from ..config import ControlSettings
 
-APPROVAL_TTL_MINUTES = 15
+log = logging.getLogger(__name__)
 
 
 def state_hash(target: str, resource_version: str | None, params: dict) -> str:
@@ -60,11 +60,11 @@ class ApprovalGate:
     """mode: prompt | auto | deny | timeout"""
 
     def __init__(self, mode: str = "auto", render: Callable[[dict], None] | None = None,
-                 ask: Callable[[str], str] | None = None, ttl_seconds: float = APPROVAL_TTL_MINUTES * 60) -> None:
+                 ask: Callable[[str], str] | None = None, ttl_seconds: float | None = None) -> None:
         self.mode = mode
         self.render = render or (lambda packet: None)
         self.ask = ask or input
-        self.ttl_seconds = ttl_seconds
+        self.ttl_seconds = ControlSettings().approval_ttl_s if ttl_seconds is None else ttl_seconds
 
     def request(self, packet: dict, owners: list[str], required: int) -> dict:
         self.render(packet)

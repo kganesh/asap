@@ -15,5 +15,6 @@ Each record captures one decision: the context, the options considered, what was
 | [0009](0009-deterministic-reasoner-fallback.md) | A deterministic reasoner when no LLM key is configured | Built |
 | [0010](0010-context-caching-over-compaction.md) | Cache the conversation prefix; compact only as a safety valve; per-run token budget | Built |
 | [0011](0011-fleet-wide-blast-radius.md) | Fleet-wide blast radius: per-domain auto budget, incident-storm brake, fleet lock | Built |
+| [0012](0012-one-home-per-number.md) | One home per number: typed settings, policy constants, named algorithm constants | Built |
 
 New decisions get the next number. A superseded ADR stays in place with its status changed to "Superseded by ADR-NNNN".

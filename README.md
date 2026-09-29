@@ -6,7 +6,7 @@ The design rule behind everything: **the LLM only proposes, and a deterministic 
 
 - [ARCHITECTURE.md](ARCHITECTURE.md): data plane and control plane, the agent state machine, tool contracts, and the choice of reasoning pattern
 - [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md): guardrails, blast radius and human-in-the-loop (HITL), audit, alert storms, measured LLM token cost and capacity, failure modes and consistency
-- [docs/adr](docs/adr/README.md): eleven Architecture Decision Records: options considered, decision, trade-offs accepted
+- [docs/adr](docs/adr/README.md): twelve Architecture Decision Records: options considered, decision, trade-offs accepted
 - [docs/live-runs](docs/live-runs/README.md): evidence from live Claude Sonnet 5.5 runs of all three scenarios: reports and verifiable hash-chained audit logs
 
 ---
@@ -49,7 +49,7 @@ make docker-demo          # = docker compose run --rm asap demo --approve auto -
 | `make attack` | 16 adversarial mock "LLMs" try to cause damage (drop the DB, restart-loop, prompt injection, fabricated or irrelevant evidence, a fleet-wide storm of individually valid actions, and more). Every one is contained, and the table shows which guardrail stopped it |
 | `make storm` | 5,000 alerts in one minute collapse to **2 incidents** (flap suppression, debounce, dedup, dependency-graph correlation) before any LLM token is spent |
 | `make tokens` | Measures the input tokens each run would send to an LLM: typical runs, a worst case, early compaction vs prompt caching, and a tight per-run budget (see ADR-0010) |
-| `make test` | Rego policy unit tests (`opa test`) plus 77 pytest tests covering the guardrails, production edge cases, token controls and code-review regressions |
+| `make test` | Rego policy unit tests (`opa test`) plus 85 pytest tests covering the guardrails, production edge cases, token controls, configuration drift and code-review regressions |
 | `.venv/bin/asap replay <run_id>` | Replays a run from its hash-chained audit log, with no LLM calls, and verifies the chain |
 
 | Scenario | Injected fault | Correct outcome |
@@ -69,11 +69,19 @@ asap attack [--only NAME ...] [-v]
 asap storm  [--alerts 5000]
 asap tokens                 # measured LLM input tokens per run: caching, compaction, budget
 asap replay RUN_ID          asap verify-audit RUN_ID
-asap doctor                 # which reasoner and policy engine will be used
+asap doctor                 # reasoner, policy engine, policy thresholds and any setting overrides
 asap sim --scenario NAME --port 8080    # run the simulator standalone; browse http://localhost:8080/docs
 ```
 
-Environment: `ASAP_KILL_SWITCH=1` forces report-only; `ASAP_CHANGE_FREEZE=1` makes every action require approval; `ASAP_LOG_LEVEL=INFO` (or `--log-level`) shows operational logs on stderr. The audit trail is separate, in `runs/<run_id>/audit.jsonl`.
+Configuration ([ADR-0012](docs/adr/0012-one-home-per-number.md)): no tunable is written inline. Operational settings (models, timeouts, time windows, lease TTLs, run caps) are typed defaults in [`asap/config.py`](asap/config.py), each overridable by the `ASAP_*` variable named next to it. Policy thresholds (confidence floor, budgets, blast-radius line, fleet and storm limits) are named constants in [`policies/remediation.rego`](policies/remediation.rego), and the Python code reads them from there. Common overrides:
+
+- `ASAP_KILL_SWITCH=1`: every action is denied (report-only).
+- `ASAP_CHANGE_FREEZE=1`: every action needs approval.
+- `ASAP_MODEL=...`: choose the model.
+- `ASAP_MAX_STEPS=...`, `ASAP_RUN_DEADLINE_S=...`: tighten the run caps.
+- `ASAP_LOG_LEVEL=INFO` (or `--log-level`): show operational logs on stderr.
+
+The audit trail is separate, in `runs/<run_id>/audit.jsonl`.
 
 ## Repository layout
 
@@ -88,8 +96,10 @@ asap/
   executor/     the only component with write credentials: dry-run, precondition check, idempotent apply, verify, revert rules
   audit/        hash-chained audit log + anchors
   telemetry/    OpenTelemetry tracing, Prometheus metrics
+  config.py     typed operational settings (Limits, LLM, control, execution, ingest) with ASAP_* overrides
+  signals.py    shared signal definitions (anomaly rule, change point), used by the gateway and the control plane
 policies/       remediation.rego (single source of truth) + remediation_test.rego
-tests/          scenarios, adversarial attacks, production edge cases, unit tests
+tests/          scenarios, adversarial attacks, production edge cases, configuration drift, unit tests
 ```
 
 ## What the PoC simplifies (and the production design)

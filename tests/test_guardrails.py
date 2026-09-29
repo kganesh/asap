@@ -76,7 +76,7 @@ def test_alert_resolved_before_investigation(env):
 def test_duplicate_incident_delivery_is_ignored(env):
     env.load("bad_deploy")
     incident = env.incidents()[0]
-    env.store.acquire_lease(f"incident:{incident.incident_id}", "run-other", env.server.world.now)
+    env.store.acquire_lease(f"incident:{incident.incident_id}", "run-other", env.server.world.now, ttl_s=900)
     run = env.orchestrator(DeterministicReasoner(), ApprovalGate("auto")).run(incident)
     assert run.outcome == "REPORT_ONLY" and "duplicate" in run.outcome_reason
 

@@ -63,7 +63,7 @@ def setup() -> trace.Tracer:
     if _provider is None:
         _provider = TracerProvider(resource=Resource.create({"service.name": "asap-agent"}))
         _provider.add_span_processor(SimpleSpanProcessor(_exporter))
-        if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):  # the OpenTelemetry standard variable, not an ASAP setting
             try:
                 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 

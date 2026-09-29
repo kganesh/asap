@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
+
+from ..config import ControlSettings
 
 QUERY = ("[data.asap.remediation.decision, data.asap.remediation.deny, "
          "data.asap.remediation.require_approval, data.asap.remediation.required_approvals]")
@@ -24,10 +26,13 @@ class PolicyUnavailable(Exception):
     pass
 
 
-def policy_dir() -> Path:
-    env = os.environ.get("ASAP_POLICY_DIR")
-    if env:
-        return Path(env)
+# Unconditional top-level numeric constants, e.g. `min_diagnosis_confidence := 0.6` (not rules ending in `if`).
+_CONSTANT = re.compile(r"^([a-z_][a-z0-9_]*)\s*:=\s*(-?\d+(?:\.\d+)?)\s*(?:#.*)?$", re.MULTILINE)
+
+
+def policy_dir(override: str = "") -> Path:
+    if override:
+        return Path(override)
     here = Path(__file__).resolve()
     for cand in (here.parents[2] / "policies", here.parents[1] / "_policies"):
         if (cand / "remediation.rego").exists():
@@ -35,21 +40,35 @@ def policy_dir() -> Path:
     raise PolicyUnavailable("policy bundle not found")
 
 
-def _find_opa() -> str | None:
-    env = os.environ.get("ASAP_OPA_BIN")
-    if env and Path(env).exists():
-        return env
+def _find_opa(override: str = "") -> str | None:
+    if override and Path(override).exists():
+        return override
     local = Path(__file__).resolve().parents[2] / "bin" / "opa"
     if local.exists():
         return str(local)
     return shutil.which("opa")
 
 
+def parse_constants(source: str) -> dict[str, float]:
+    """The policy's named numeric thresholds. The policy stays the single source of truth for them."""
+    return {name: (float(v) if "." in v else int(v)) for name, v in _CONSTANT.findall(source)}
+
+
+def policy_constant(name: str, settings: ControlSettings | None = None) -> float | None:
+    """One named threshold from the bundled policy, or None if the policy can't be read."""
+    try:
+        return parse_constants((policy_dir((settings or ControlSettings()).policy_dir) / "remediation.rego")
+                               .read_text()).get(name)
+    except (PolicyUnavailable, OSError):
+        return None
+
+
 class PolicyEngine:
-    def __init__(self, engine: str = "auto", timeout_s: float = 5.0) -> None:
-        self.timeout_s = timeout_s
+    def __init__(self, engine: str = "auto", settings: ControlSettings | None = None) -> None:
+        settings = settings or ControlSettings()
+        self.timeout_s = settings.policy_timeout_s
         self.forced_unavailable = False  # test hook: simulate OPA outage
-        self.opa = _find_opa() if engine in ("auto", "opa") else None
+        self.opa = _find_opa(settings.opa_bin) if engine in ("auto", "opa") else None
         self.regopy = None
         if self.opa is None and engine in ("auto", "regopy"):
             try:
@@ -59,11 +78,12 @@ class PolicyEngine:
             except ImportError:
                 self.regopy = None
         try:
-            self.path = policy_dir() / "remediation.rego"
+            self.path = policy_dir(settings.policy_dir) / "remediation.rego"
             self.source = self.path.read_text()
             self.digest = "sha256:" + hashlib.sha256(self.source.encode()).hexdigest()[:16]
         except (PolicyUnavailable, OSError):
             self.path, self.source, self.digest = None, None, "unavailable"
+        self.constants = parse_constants(self.source) if self.source else {}
 
     @property
     def name(self) -> str:
@@ -79,33 +99,35 @@ class PolicyEngine:
         return "none (fail-closed)"
 
     def evaluate(self, policy_input: dict) -> dict:
+        return _shape(self.query(QUERY, policy_input))
+
+    def query(self, query: str, policy_input: dict | None = None) -> object:
+        """Evaluate one Rego expression against the bundle. Any failure raises PolicyUnavailable."""
         if self.forced_unavailable or self.source is None:
             raise PolicyUnavailable("policy engine unreachable")
         if self.opa:
-            return self._eval_opa(policy_input)
+            return self._eval_opa(query, policy_input or {})
         if self.regopy:
-            return self._eval_regopy(policy_input)
+            return self._eval_regopy(query, policy_input or {})
         raise PolicyUnavailable("no Rego evaluator installed (run `make setup` or `pip install asap[rego]`)")
 
-    def _eval_opa(self, policy_input: dict) -> dict:
+    def _eval_opa(self, query: str, policy_input: dict) -> object:
         try:
-            p = subprocess.run([self.opa, "eval", "--format=json", "--stdin-input", "-d", str(self.path), QUERY],
+            p = subprocess.run([self.opa, "eval", "--format=json", "--stdin-input", "-d", str(self.path), query],
                                input=json.dumps(policy_input), capture_output=True, text=True,
                                timeout=self.timeout_s, check=True)
-            value = json.loads(p.stdout)["result"][0]["expressions"][0]["value"]
+            return json.loads(p.stdout)["result"][0]["expressions"][0]["value"]
         except (subprocess.SubprocessError, OSError, KeyError, IndexError, json.JSONDecodeError) as e:
             raise PolicyUnavailable(f"opa evaluation failed: {e}") from e
-        return _shape(value)
 
-    def _eval_regopy(self, policy_input: dict) -> dict:
+    def _eval_regopy(self, query: str, policy_input: dict) -> object:
         try:
             interp = self.regopy.Interpreter()  # type: ignore[union-attr]
             interp.add_module("remediation.rego", self.source)
             interp.set_input_term(json.dumps(policy_input))
-            value = json.loads(str(interp.query(QUERY)))["expressions"][0]
+            return json.loads(str(interp.query(query)))["expressions"][0]
         except Exception as e:  # noqa: BLE001 - any evaluator failure must fail closed
             raise PolicyUnavailable(f"regopy evaluation failed: {e}") from e
-        return _shape(value)
 
 
 def _shape(value: list) -> dict:

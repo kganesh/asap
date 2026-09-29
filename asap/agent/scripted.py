@@ -12,7 +12,22 @@ from __future__ import annotations
 import math
 
 from ..models import Evidence, RunState
+from ..signals import DOMINANT_DOWNSTREAM_SHARE, SUSPECT_DEPLOY_WINDOW_MIN
 from .llm import LLMResponse
+
+# The checklist's query shapes.
+METRIC_WINDOW_MIN = 30  # golden-signal look-back
+RECENT_WINDOW_MIN = 15  # traces and logs look-back
+LOG_CLUSTERS = 8
+
+# Decision thresholds of this rule-based stand-in model. A real LLM makes these judgments itself; the
+# deterministic protections (policy, scope, evidence relevance) do not depend on them.
+ERROR_RATIO_INCIDENT = 0.05  # 5xx ratio worth calling a defect
+LATENCY_INCIDENT_S = 1.0  # p99 worth calling a latency incident
+THROTTLE_SATURATED = 0.25  # share of CFS periods throttled
+SCALE_FACTOR = 2  # proposed replicas = double, within the HPA max
+CONFIDENCE = {"bad_deploy": 0.86, "dependency_failure": 0.8, "saturation": 0.8, "unknown": 0.4}
+NO_ACTION_REASON_CHARS = 400  # the no_action tool's schema limit
 
 
 class DeterministicReasoner:
@@ -61,12 +76,17 @@ class DeterministicReasoner:
     def _investigate(self, run: RunState, s: str) -> LLMResponse:
         checklist = [
             ("get_deployment_history", {"service": s}, "What changed recently?"),
-            ("query_metrics", {"metric": "error_ratio", "service": s, "window_minutes": 30}, "Error ratio and when it moved."),
-            ("query_metrics", {"metric": "latency_p99_seconds", "service": s, "window_minutes": 30}, "Latency shape."),
-            ("query_metrics", {"metric": "cpu_throttle_ratio", "service": s, "window_minutes": 30}, "Saturation check."),
-            ("get_traces", {"service": s, "window_minutes": 15}, "Where does request time go?"),
-            ("search_logs", {"service": s, "level": "ERROR", "window_minutes": 15, "limit": 8}, "New exceptions?"),
-            ("search_logs", {"service": s, "level": "WARN", "window_minutes": 15, "limit": 8}, "Warnings: queueing, slow calls?"),
+            ("query_metrics", {"metric": "error_ratio", "service": s, "window_minutes": METRIC_WINDOW_MIN},
+             "Error ratio and when it moved."),
+            ("query_metrics", {"metric": "latency_p99_seconds", "service": s, "window_minutes": METRIC_WINDOW_MIN},
+             "Latency shape."),
+            ("query_metrics", {"metric": "cpu_throttle_ratio", "service": s, "window_minutes": METRIC_WINDOW_MIN},
+             "Saturation check."),
+            ("get_traces", {"service": s, "window_minutes": RECENT_WINDOW_MIN}, "Where does request time go?"),
+            ("search_logs", {"service": s, "level": "ERROR", "window_minutes": RECENT_WINDOW_MIN, "limit": LOG_CLUSTERS},
+             "New exceptions?"),
+            ("search_logs", {"service": s, "level": "WARN", "window_minutes": RECENT_WINDOW_MIN, "limit": LOG_CLUSTERS},
+             "Warnings: queueing, slow calls?"),
             ("get_resource_state", {"service": s}, "Replicas, HPA bounds, PDB."),
         ]
         for tool, args, why in checklist:
@@ -75,7 +95,7 @@ class DeterministicReasoner:
                 return self._call(tool, args, why)
         traces = self._find(run, "get_traces", service=s)
         top = (traces.result.get("downstream") or [None])[0] if traces else None
-        if top and top["share_of_root_p99"] >= 0.6:
+        if top and top["share_of_root_p99"] >= DOMINANT_DOWNSTREAM_SHARE:
             d = top["peer.service"]
             if run.replans == 0 and not any("downstream" in h for h in (run.plan or {}).get("hypotheses", [])):
                 return self._call("submit_plan", {
@@ -85,7 +105,7 @@ class DeterministicReasoner:
             if not self._find(run, "get_resource_state", service=d):
                 return self._call("get_resource_state", {"service": d}, f"What kind of workload is {d}?")
             if not self._find(run, "search_logs", service=d):
-                return self._call("search_logs", {"service": d, "window_minutes": 15, "limit": 8},
+                return self._call("search_logs", {"service": d, "window_minutes": RECENT_WINDOW_MIN, "limit": LOG_CLUSTERS},
                                   f"Is {d} itself unhealthy (locks, slow queries)?")
         return self._diagnose(run, s)
 
@@ -108,21 +128,21 @@ class DeterministicReasoner:
         err_onset = onset(err)
         new_version_errors = bool(errlogs and cur and any(
             x.get("version") == cur["version"] for c in errlogs.result.get("clusters", []) for x in c["exemplars"]))
-        if (err and err.result["current"] > 0.05 and err_onset is not None and cur and prev
-                and 0 <= cur["age_minutes"] - err_onset <= 15 and new_version_errors):
+        if (err and err.result["current"] > ERROR_RATIO_INCIDENT and err_onset is not None and cur and prev
+                and 0 <= cur["age_minutes"] - err_onset <= SUSPECT_DEPLOY_WINDOW_MIN and new_version_errors):
             ev = [hist.evidence_id, err.evidence_id, errlogs.evidence_id]  # type: ignore[union-attr]
             return self._call("submit_diagnosis", {
                 "root_cause": f"{s} {cur['version']} (revision {cur['revision']}, '{cur['change_cause']}') introduced "
                               f"errors: 5xx ratio {err.result['baseline']:.1%} -> {err.result['current']:.1%} starting "
                               f"{cur['age_minutes'] - err_onset:.1f} min after rollout; exceptions carry version "
                               f"{cur['version']}.",
-                "root_service": s, "category": "bad_deploy", "confidence": 0.86, "evidence_ids": ev,
+                "root_service": s, "category": "bad_deploy", "confidence": CONFIDENCE["bad_deploy"], "evidence_ids": ev,
                 "recommended_action": "rollback"},
                 f"Temporal correlation + version-tagged exceptions. Previous good revision {prev['revision']} "
                 f"({prev['version']}).")
         # Rule 2: latency dominated by a downstream dependency
         top = (traces.result.get("downstream") or [None])[0] if traces else None
-        if top and top["share_of_root_p99"] >= 0.6 and lat and lat.result["current"] > 1.0:
+        if top and top["share_of_root_p99"] >= DOMINANT_DOWNSTREAM_SHARE and lat and lat.result["current"] > LATENCY_INCIDENT_S:
             d = top["peer.service"]
             dstate = self._find(run, "get_resource_state", service=d)
             dlogs = self._find(run, "search_logs", service=d)
@@ -138,25 +158,25 @@ class DeterministicReasoner:
                 "root_cause": f"{d} ({kind}) dominates {s} latency: {top['share_of_root_p99']:.0%} of p99 "
                               f"({top['p99_ms']:.0f} ms); logs show lock waits/slow queries.{deploy_note} "
                               f"Page {owner}.",
-                "root_service": d, "category": "dependency_failure", "confidence": 0.8, "evidence_ids": ev,
+                "root_service": d, "category": "dependency_failure", "confidence": CONFIDENCE["dependency_failure"], "evidence_ids": ev,
                 "recommended_action": "none"},
                 f"Stateful dependency {d} is the bottleneck; rolling back or restarting {s} would not help.")
         # Rule 3: CPU saturation
-        if thr and thr.result["current"] > 0.25 and state and state.result.get("hpa"):
+        if thr and thr.result["current"] > THROTTLE_SATURATED and state and state.result.get("hpa"):
             reps = state.result["replicas"]
-            want = min(state.result["hpa"]["maxReplicas"], max(reps + 1, math.ceil(reps * 2)))
+            want = min(state.result["hpa"]["maxReplicas"], max(reps + 1, math.ceil(reps * SCALE_FACTOR)))
             return self._call("submit_diagnosis", {
                 "root_cause": f"{s} is CPU-saturated: throttled {thr.result['current']:.0%} of CFS periods "
                               f"(baseline {thr.result['baseline']:.0%}) after a traffic increase; no deploy correlates. "
                               f"Scale {reps} -> {want} replicas via HPA minReplicas.",
-                "root_service": s, "category": "saturation", "confidence": 0.8,
+                "root_service": s, "category": "saturation", "confidence": CONFIDENCE["saturation"],
                 "evidence_ids": [thr.evidence_id, lat.evidence_id if lat else thr.evidence_id, state.evidence_id],
                 "recommended_action": "scale"},
                 "Throttling explains the latency; capacity, not code.")
         ev = [e.evidence_id for e in (err, lat, thr) if e] or list(run.evidence)[:1]
         return self._call("submit_diagnosis", {
             "root_cause": "No rule matched with sufficient evidence; handing to on-call.", "root_service": s,
-            "category": "unknown", "confidence": 0.4, "evidence_ids": ev, "recommended_action": "none"},
+            "category": "unknown", "confidence": CONFIDENCE["unknown"], "evidence_ids": ev, "recommended_action": "none"},
             "Low confidence.")
 
     # ------------------------------------------------------------------ propose
@@ -178,9 +198,9 @@ class DeterministicReasoner:
             st = self._find(run, "get_resource_state", service=s)
             reps = st.result["replicas"] if st else 1
             hpa_max = st.result["hpa"]["maxReplicas"] if st else reps
-            want = min(hpa_max, max(reps + 1, math.ceil(reps * 2)))
+            want = min(hpa_max, max(reps + 1, math.ceil(reps * SCALE_FACTOR)))
             return self._call("propose_scale", {"deployment": s, "replicas": want, "evidence_ids": ev,
                                                 "rationale": f"relieve CPU throttling: {reps} -> {want}"},
                               f"Saturation: doubling replicas within the HPA max ({hpa_max}) should clear throttling.")
-        return self._call("no_action", {"reason": d.get("root_cause", "insufficient evidence")[:400]},
+        return self._call("no_action", {"reason": d.get("root_cause", "insufficient evidence")[:NO_ACTION_REASON_CHARS]},
                           "Automation would not help; report to the owning team.")

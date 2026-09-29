@@ -42,18 +42,21 @@ class StateStore:
             raise StoreUnavailable("control-plane state store unavailable")
 
     # ---------------------------------------------------------------- budget / breaker
-    def budget(self, target: str, now: float) -> dict:
+    # The store only counts. Which windows to count over is a control-plane setting, and what the counts
+    # allow is the Rego policy's decision.
+    def budget(self, target: str, now: float, short_window_s: float, long_window_s: float) -> dict:
         self._check()
         c = self.db.execute
-        last30 = c("SELECT COUNT(*) FROM actions WHERE target=? AND ts>?", (target, now - 1800)).fetchone()[0]
-        last24 = c("SELECT COUNT(*) FROM actions WHERE target=? AND ts>?", (target, now - 86400)).fetchone()[0]
-        return {"actions_last_30m": last30, "actions_last_24h": last24}
+        short = c("SELECT COUNT(*) FROM actions WHERE target=? AND ts>?", (target, now - short_window_s)).fetchone()[0]
+        long_ = c("SELECT COUNT(*) FROM actions WHERE target=? AND ts>?", (target, now - long_window_s)).fetchone()[0]
+        return {"actions_short_window": short, "short_window_minutes": int(short_window_s // 60),
+                "actions_long_window": long_, "long_window_minutes": int(long_window_s // 60)}
 
-    def circuit_open(self, target: str, action: str, now: float) -> bool:
+    def circuit_open(self, target: str, action: str, now: float, window_s: float) -> bool:
         self._check()
         row = self.db.execute(
             "SELECT COUNT(*) FROM actions WHERE target=? AND action=? AND ts>? AND outcome IN ('no_improvement','reverted')",
-            (target, action, now - 86400)).fetchone()
+            (target, action, now - window_s)).fetchone()
         return row[0] > 0
 
     def record_action(self, proposal_id: str, run_id: str, target: str, action: str, ts: float,
@@ -67,7 +70,7 @@ class StateStore:
         self._check()
         self.db.execute("INSERT OR IGNORE INTO incidents VALUES (?,?,?)", (incident_id, domain, opened_at))
 
-    def fleet(self, domain: str, now: float, window_s: float = 600) -> dict:
+    def fleet(self, domain: str, now: float, window_s: float) -> dict:
         """Counts across ALL targets in a failure domain. Per-target budgets can't see a storm of different
         targets each taking 'one' action; these counts can."""
         self._check()
@@ -82,7 +85,7 @@ class StateStore:
         self.db.execute("UPDATE actions SET outcome=? WHERE proposal_id=?", (outcome, proposal_id))
 
     # ---------------------------------------------------------------- leases (one actor per target)
-    def acquire_lease(self, target: str, holder: str, now: float, ttl_s: float = 900) -> bool:
+    def acquire_lease(self, target: str, holder: str, now: float, ttl_s: float) -> bool:
         """Atomic compare-and-set: take the lease if it is free, expired, or already ours.
 
         A single conditional UPSERT, so it is correct across processes sharing the database file, not just

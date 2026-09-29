@@ -7,6 +7,7 @@ import hashlib
 from asap.agent.adversarial import run_attacks
 from asap.agent.scripted import DeterministicReasoner
 from asap.control.approval import ApprovalGate
+from asap.control.policy import policy_constant
 from asap.harness import run_scenario
 from asap.ingest.pipeline import AlertPipeline
 
@@ -50,7 +51,9 @@ def test_many_unrelated_incidents_in_one_cell_are_flagged_as_shared_cause():
     now = 1790701200.0
     deps = {s: [] for s in "abcdef"}  # six services with no known dependencies between them
     alerts = [_alert(s, "cell-a") for s in "abcde"] + [_alert("f", "cell-b")]
-    incidents = AlertPipeline(deps, {}).process(alerts, now)
+    threshold = policy_constant("storm_incident_threshold")  # the pipeline and the policy share one number
+    assert threshold == 4
+    incidents = AlertPipeline(deps, {}, shared_cause_incidents=threshold).process(alerts, now)
     by_cell = {i.cell: [] for i in incidents}
     for i in incidents:
         by_cell[i.cell].append(i)

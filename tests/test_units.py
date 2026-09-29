@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from asap.agent.llm import AnthropicLLM, LLMUnavailable, OpenAICompatLLM
+from asap.config import LLMSettings
 from asap.control.policy import PolicyEngine, PolicyUnavailable
 from asap.ingest.storm import run_storm
 from asap.sim.scenarios import NOW
@@ -41,7 +42,8 @@ BASE = {
     "cluster": {"pods_used": 30, "pods_allocatable": 80},
     "dry_run": {"ok": True, "crosses_migration": False}, "diagnosis": {"confidence": 0.8},
     "evidence": {"valid": True, "has_relevant_metric": True}, "scope": {"in_incident_scope": True},
-    "budget": {"actions_last_30m": 0, "actions_last_24h": 0, "circuit_open": False},
+    "budget": {"actions_short_window": 0, "actions_long_window": 0, "short_window_minutes": 30,
+               "long_window_minutes": 1440, "circuit_open": False},
     "controls": {"kill_switch": False, "change_freeze": False}, "blast_radius": 25,
     "fleet": {"window_minutes": 10, "auto_actions": 0, "actions": 0, "open_incidents": 1},
 }
@@ -85,7 +87,7 @@ def _anthropic_with(fake_create):
 
     llm._anthropic = anthropic
     llm.model, llm.fallback = "claude-sonnet-5-5", "claude-haiku-4-5-20251001"
-    llm._tool_choice = {}
+    llm._tool_choice, llm.settings = {}, LLMSettings()
     llm.client = SimpleNamespace(messages=SimpleNamespace(create=fake_create))
     return llm
 

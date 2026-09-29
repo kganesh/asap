@@ -18,6 +18,18 @@ fleet_auto_budget := 2 # unattended actions in the domain before every further a
 
 storm_incident_threshold := 4 # simultaneous incidents that suggest a shared-infrastructure cause
 
+# Every threshold is named here, once. Python reads these constants (PolicyEngine.constants) instead of
+# restating them; the time windows they apply to are operational settings passed in the input.
+min_diagnosis_confidence := 0.6
+
+max_actions_short_window := 1 # per target, per input.budget.short_window_minutes
+
+max_actions_long_window := 3 # per target, per input.budget.long_window_minutes
+
+approval_blast_radius := 50 # scores at or above this need a human
+
+restart_min_headroom_pct := 30 # cluster headroom a rolling restart must leave
+
 # ---------------------------------------------------------------- tier 3: deny
 deny contains "action type is not in the allowlist" if {
 	not input.action.type in allowed_actions
@@ -41,8 +53,8 @@ deny contains "rollback crosses a schema migration" if {
 	input.dry_run.crosses_migration == true
 }
 
-deny contains sprintf("diagnosis confidence %v is below 0.6", [input.diagnosis.confidence]) if {
-	input.diagnosis.confidence < 0.6
+deny contains sprintf("diagnosis confidence %v is below %v", [input.diagnosis.confidence, min_diagnosis_confidence]) if {
+	input.diagnosis.confidence < min_diagnosis_confidence
 }
 
 deny contains "evidence IDs are missing or were never issued in this run" if {
@@ -53,12 +65,12 @@ deny contains "target is outside the incident's dependency scope" if {
 	input.scope.in_incident_scope != true
 }
 
-deny contains "remediation budget: max 1 action per target per 30 minutes" if {
-	input.budget.actions_last_30m >= 1
+deny contains sprintf("remediation budget: max %v action per target per %v min", [max_actions_short_window, input.budget.short_window_minutes]) if {
+	input.budget.actions_short_window >= max_actions_short_window
 }
 
-deny contains "remediation budget: max 3 actions per target per day" if {
-	input.budget.actions_last_24h >= 3
+deny contains sprintf("remediation budget: max %v actions per target per %v min", [max_actions_long_window, input.budget.long_window_minutes]) if {
+	input.budget.actions_long_window >= max_actions_long_window
 }
 
 deny contains "circuit breaker open: this action already failed to improve this target" if {
@@ -105,11 +117,11 @@ require_approval contains "change freeze in effect" if {
 	input.controls.change_freeze == true
 }
 
-require_approval contains sprintf("blast radius %v >= 50", [input.blast_radius]) if {
-	input.blast_radius >= 50
+require_approval contains sprintf("blast radius %v >= %v", [input.blast_radius, approval_blast_radius]) if {
+	input.blast_radius >= approval_blast_radius
 }
 
-require_approval contains "restart would breach the PodDisruptionBudget or leave < 30% cluster headroom" if {
+require_approval contains sprintf("restart would breach the PodDisruptionBudget or leave under %v percent cluster headroom", [restart_min_headroom_pct]) if {
 	input.action.type == "restart"
 	not restart_safe
 }
@@ -130,9 +142,9 @@ restart_safe if {
 	input.target.replicas >= 3
 	input.target.replicas - 1 >= input.target.pdb.minAvailable
 
-	# cluster headroom > 30%, in integer arithmetic
+	# cluster headroom above restart_min_headroom_pct, in integer arithmetic
 	free_pods := input.cluster.pods_allocatable - input.cluster.pods_used
-	free_pods * 10 > input.cluster.pods_allocatable * 3
+	free_pods * 100 > input.cluster.pods_allocatable * restart_min_headroom_pct
 }
 
 # ---------------------------------------------------------------- decision

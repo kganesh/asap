@@ -1,12 +1,25 @@
-"""Synthetic alert storm: 5,000 alerts in one minute, to exercise the funnel and the capacity model."""
+"""Synthetic alert storm: 5,000 alerts in one minute, to exercise the funnel and the capacity model.
+
+The numbers inside generate() are the storm's fixture data (pods per service, fan-out, noise share), like a
+simulator scenario; they are deliberately literal. The capacity model's inputs are named planning figures.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import random
 
+from ..control.policy import policy_constant
 from ..sim.world import iso
 from .pipeline import AlertPipeline, FunnelStats
+
+# Capacity planning figures, from the live Claude runs (38-61k input tokens processed and 2.1-2.5k output per
+# run; see SYSTEM_DESIGN.md). Input tokens are processed tokens, most of them served from the prompt cache.
+PLANNED_RUN_SECONDS = 90
+PLANNED_TOKENS_IN = 60_000
+PLANNED_TOKENS_OUT = 2_500
+PLANNED_WORKERS = 20
+CAPACITY_HEADROOM_MULTIPLIER = 5  # size the pool for 5x the observed incident rate
 
 DEPS = {"frontend": ["cart", "checkout"], "cart": ["redis-cache"], "checkout": ["payments", "inventory", "redis-cache"],
         "payments": [], "inventory": ["postgres-inventory"], "postgres-inventory": [], "redis-cache": [],
@@ -54,17 +67,16 @@ def generate(now: float, total: int = 5000, seed: int = 7) -> list[dict]:
 
 
 def run_storm(now: float, total: int = 5000) -> tuple[FunnelStats, list]:
-    pipe = AlertPipeline(DEPS, TIERS)
+    pipe = AlertPipeline(DEPS, TIERS, shared_cause_incidents=policy_constant("storm_incident_threshold"))
     alerts = generate(now, total)
     # flapping alerts are processed in arrival order; resolved ones record transitions first
     incidents = pipe.process(alerts, now)
     return pipe.stats, incidents
 
 
-def capacity_model(incidents_per_min: float, run_seconds: float = 90, tokens_in: int = 60_000,
-                   tokens_out: int = 2_500, workers: int = 20) -> dict:
-    """Defaults from the live Claude runs (38-61k input tokens processed, 2.1-2.5k output per run; see
-    SYSTEM_DESIGN.md). Input tokens are processed tokens, most of them served from the prompt cache."""
+def capacity_model(incidents_per_min: float, run_seconds: float = PLANNED_RUN_SECONDS,
+                   tokens_in: int = PLANNED_TOKENS_IN, tokens_out: int = PLANNED_TOKENS_OUT,
+                   workers: int = PLANNED_WORKERS) -> dict:
     runs_per_worker_min = 60 / run_seconds
     needed = incidents_per_min / runs_per_worker_min
     return {

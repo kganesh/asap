@@ -20,23 +20,25 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import urlparse
 
 import httpx
 
+from ..config import LLMSettings
 from ..models import RunState
 
 log = logging.getLogger(__name__)
 
-DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5"
-FALLBACK_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
-
-
 # Anthropic docs: Claude Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 return 400 for tool_choice any/tool.
 AUTO_ONLY_MODELS = re.compile(r"claude-(opus|sonnet)-5-5|claude-fable-|claude-mythos-")
+# Overloaded, rate-limited or failing upstream: worth hedging to the fallback model. Anything else is our bug.
+RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 529})
+# Local OpenAI-compatible servers (Ollama) accept any bearer token.
+LOCAL_API_KEY_PLACEHOLDER = "ollama"
 
 
-def initial_tool_choice(model: str) -> str:
-    override = os.environ.get("ASAP_TOOL_CHOICE", "").strip().lower()
+def initial_tool_choice(model: str, override: str = "") -> str:
+    override = override.strip().lower()
     if override in ("any", "auto"):
         return override
     return "auto" if AUTO_ONLY_MODELS.search(model) else "any"
@@ -72,19 +74,21 @@ class LLM(Protocol):
 class AnthropicLLM:
     name = "anthropic"
 
-    def __init__(self, model: str | None = None, fallback: str | None = FALLBACK_ANTHROPIC_MODEL) -> None:
+    def __init__(self, model: str | None = None, fallback: str | None = None,
+                 settings: LLMSettings | None = None) -> None:
         import anthropic
 
+        s = self.settings = settings or LLMSettings()
         self._anthropic = anthropic
-        self.client = anthropic.Anthropic(max_retries=2)
-        self.model = model or os.environ.get("ASAP_MODEL", DEFAULT_ANTHROPIC_MODEL)
-        self.fallback = os.environ.get("ASAP_FALLBACK_MODEL", fallback or "") or None
+        self.client = anthropic.Anthropic(max_retries=s.sdk_max_retries)  # API key: read by the SDK from the env
+        self.model = model or s.model or s.anthropic_model
+        self.fallback = (s.anthropic_fallback_model if fallback is None else fallback) or None
         # model -> "any" | "auto". Known model families that reject forced tool choice start on "auto" (saves a
         # failed request per run); anything else is learned from the API's 400. ASAP_TOOL_CHOICE overrides.
         self._tool_choice: dict[str, str] = {}
         for m in (self.model, self.fallback):
             if m:
-                self._tool_choice[m] = initial_tool_choice(m)
+                self._tool_choice[m] = initial_tool_choice(m, s.tool_choice)
 
     @staticmethod
     def to_messages(messages: list[dict], cache_tail: bool = False) -> list[dict]:
@@ -115,11 +119,11 @@ class AnthropicLLM:
              "reasoning in the tool's `reasoning` field.")
 
     def _call(self, model: str, system: str, messages: list[dict], tools: list[dict], timeout_s: float,  # type: ignore[no-untyped-def]
-              max_tokens: int = 2048, extra: list[dict] | None = None):
+              max_tokens: int | None = None, extra: list[dict] | None = None):
         tool_defs = [dict(t) for t in tools]
         tool_defs[-1] = {**tool_defs[-1], "cache_control": {"type": "ephemeral"}}
         return self.client.messages.create(
-            model=model, max_tokens=max_tokens,
+            model=model, max_tokens=max_tokens or self.settings.max_output_tokens,
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             tools=tool_defs,
             tool_choice={"type": self._tool_choice.get(model, "any"), "disable_parallel_tool_use": True},
@@ -152,7 +156,7 @@ class AnthropicLLM:
                 log.warning("Anthropic call to %s failed (%s); hedging to fallback", model, type(e).__name__)
                 last_err = e
             except a.APIStatusError as e:
-                if e.status_code in (429, 500, 502, 503, 529):
+                if e.status_code in RETRYABLE_STATUS:
                     log.warning("Anthropic call to %s returned %s; hedging to fallback", model, e.status_code)
                     last_err = e
                     continue
@@ -164,7 +168,8 @@ class AnthropicLLM:
         try:
             if tool is None and getattr(resp, "stop_reason", None) == "max_tokens":
                 log.warning("response truncated before the tool call; retrying once with a larger budget")
-                resp = self._create(resp.model, system, messages, tools, timeout_s, max_tokens=4096)
+                resp = self._create(resp.model, system, messages, tools, timeout_s,
+                                    max_tokens=self.settings.truncated_retry_max_tokens)
                 usage.append(resp.usage)
                 tool = next((b for b in resp.content if b.type == "tool_use"), None)
             if tool is None:
@@ -190,15 +195,19 @@ class AnthropicLLM:
 
 # ---------------------------------------------------------------------------- OpenAI-compatible
 class OpenAICompatLLM:
-    """OpenAI chat-completions API with tools. Works with OpenAI and with Ollama (http://localhost:11434/v1)."""
+    """OpenAI chat-completions API with tools. Works with OpenAI and with a local Ollama server."""
 
     name = "openai-compatible"
 
-    def __init__(self, model: str | None = None, base_url: str | None = None, api_key: str | None = None) -> None:
-        self.base_url = (base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "ollama")
-        self.model = model or os.environ.get("ASAP_MODEL", "gpt-4.1-mini" if "openai.com" in self.base_url else "llama3.1")
-        self.http = httpx.Client(timeout=60)
+    def __init__(self, model: str | None = None, base_url: str | None = None, api_key: str | None = None,
+                 settings: LLMSettings | None = None) -> None:
+        s = settings or LLMSettings()
+        self.base_url = (base_url or s.openai_base_url or s.openai_public_url).rstrip("/")
+        # A secret, so read from the environment (never stored in Settings, never logged).
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", LOCAL_API_KEY_PLACEHOLDER)
+        is_openai = urlparse(self.base_url).hostname == urlparse(s.openai_public_url).hostname
+        self.model = model or s.model or (s.openai_model if is_openai else s.ollama_model)
+        self.http = httpx.Client(timeout=s.http_timeout_s)
 
     @staticmethod
     def to_messages(system: str, messages: list[dict]) -> list[dict]:
@@ -248,16 +257,18 @@ class OpenAICompatLLM:
                            (time.time() - t0) * 1000)
 
 
-def select_llm(choice: str = "auto") -> LLM:
+def select_llm(choice: str = "auto", settings: LLMSettings | None = None) -> LLM:
+    """auto: Claude if ANTHROPIC_API_KEY is set, an OpenAI-compatible endpoint if OPENAI_API_KEY or
+    OPENAI_BASE_URL is set, else the deterministic reasoner. Only the presence of a key is checked here."""
     from .scripted import DeterministicReasoner
 
+    s = settings or LLMSettings()
     if choice == "scripted":
         return DeterministicReasoner()
     if choice == "anthropic" or (choice == "auto" and os.environ.get("ANTHROPIC_API_KEY")):
-        return AnthropicLLM()
-    if choice in ("openai", "ollama") or (choice == "auto" and (os.environ.get("OPENAI_API_KEY") or
-                                                               os.environ.get("OPENAI_BASE_URL"))):
-        if choice == "ollama" and not os.environ.get("OPENAI_BASE_URL"):
-            return OpenAICompatLLM(base_url="http://localhost:11434/v1")
-        return OpenAICompatLLM()
+        return AnthropicLLM(settings=s)
+    if choice in ("openai", "ollama") or (choice == "auto" and (os.environ.get("OPENAI_API_KEY") or s.openai_base_url)):
+        if choice == "ollama" and not s.openai_base_url:
+            return OpenAICompatLLM(base_url=s.ollama_base_url, settings=s)
+        return OpenAICompatLLM(settings=s)
     return DeterministicReasoner()

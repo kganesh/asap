@@ -11,6 +11,7 @@ import httpx
 from asap.agent.adversarial import PLAN, ScriptedLLM
 from asap.agent.llm import AnthropicLLM
 from asap.agent.scripted import DeterministicReasoner
+from asap.config import LLMSettings
 from asap.control.approval import ApprovalGate
 from asap.harness import run_scenario
 from asap.models import Proposal
@@ -50,11 +51,11 @@ def test_target_lease_is_held_through_revalidation_and_verification(env):
     real_revalidate, real_verify = orch.plane.revalidate, orch.executor.verify
 
     def revalidate(*a, **k):
-        seen["reval"] = env.store.acquire_lease("target:payments", "run-intruder", env.server.world.now)
+        seen["reval"] = env.store.acquire_lease("target:payments", "run-intruder", env.server.world.now, ttl_s=900)
         return real_revalidate(*a, **k)
 
     def verify(*a, **k):
-        seen["verify"] = env.store.acquire_lease("target:payments", "run-intruder", env.server.world.now)
+        seen["verify"] = env.store.acquire_lease("target:payments", "run-intruder", env.server.world.now, ttl_s=900)
         return real_verify(*a, **k)
 
     orch.plane.revalidate, orch.executor.verify = revalidate, verify
@@ -65,7 +66,7 @@ def test_target_lease_is_held_through_revalidation_and_verification(env):
 
 def test_competing_actor_holding_the_target_blocks_execution(env):
     env.load("cpu_throttle")
-    env.store.acquire_lease("target:payments", "human-kubectl-session", env.server.world.now)
+    env.store.acquire_lease("target:payments", "human-kubectl-session", env.server.world.now, ttl_s=900)
     run, _ = run_scenario(env, "cpu_throttle", DeterministicReasoner(), ApprovalGate("auto"))
     assert run.outcome == "REPORT_ONLY" and "lease" in run.outcome_reason and run.execution is None
 
@@ -150,9 +151,9 @@ def test_leases_are_atomic_across_connections(tmp_path):
     from asap.control.store import StateStore
 
     a, b = StateStore(tmp_path / "s.db"), StateStore(tmp_path / "s.db")
-    assert a.acquire_lease("t", "A", 100)
-    assert not b.acquire_lease("t", "B", 100)
-    assert b.acquire_lease("t", "B", 100 + 901)  # expired
+    assert a.acquire_lease("t", "A", 100, ttl_s=900)
+    assert not b.acquire_lease("t", "B", 100, ttl_s=900)
+    assert b.acquire_lease("t", "B", 100 + 901, ttl_s=900)  # expired
 
 
 def test_anthropic_truncated_response_is_retried_once():
@@ -172,10 +173,11 @@ def test_anthropic_truncated_response_is_retried_once():
 
     llm = AnthropicLLM.__new__(AnthropicLLM)
     llm._anthropic, llm.model, llm.fallback = anthropic, "claude-sonnet-5-5", None
-    llm._tool_choice = {}
+    llm._tool_choice, llm.settings = {}, LLMSettings()
     llm.client = SimpleNamespace(messages=SimpleNamespace(create=create))
     r = llm.next("sys", [{"role": "user", "text": "x"}], tool_specs(["submit_plan"]), None, "PLAN", 5)
-    assert r.tool_name == "submit_plan" and calls == [2048, 4096]
+    assert r.tool_name == "submit_plan"
+    assert calls == [llm.settings.max_output_tokens, llm.settings.truncated_retry_max_tokens]
 
 
 def test_models_that_reject_forced_tool_choice_fall_back_to_auto_and_nudge():
@@ -203,7 +205,7 @@ def test_models_that_reject_forced_tool_choice_fall_back_to_auto_and_nudge():
 
     llm = AnthropicLLM.__new__(AnthropicLLM)
     llm._anthropic, llm.model, llm.fallback = anthropic, "claude-sonnet-5-5", None
-    llm._tool_choice = {}  # unknown to the static list: learned from the 400
+    llm._tool_choice, llm.settings = {}, LLMSettings()  # unknown to the static list: learned from the 400
     llm.client = SimpleNamespace(messages=SimpleNamespace(create=create))
     r = llm.next("sys", [{"role": "user", "text": "x"}], tool_specs(["submit_plan"]), None, "PLAN", 5)
     assert r.tool_name == "submit_plan" and r.thought == "Planning."
@@ -214,11 +216,10 @@ def test_models_that_reject_forced_tool_choice_fall_back_to_auto_and_nudge():
     assert calls[3][0] == "auto", "the fallback to auto is remembered per model"
 
 
-def test_known_auto_only_models_start_on_auto(monkeypatch):
+def test_known_auto_only_models_start_on_auto():
     from asap.agent.llm import initial_tool_choice
 
     assert initial_tool_choice("claude-sonnet-5-5") == "auto"
     assert initial_tool_choice("claude-opus-5-5") == "auto"
     assert initial_tool_choice("claude-haiku-4-5-20251001") == "any"
-    monkeypatch.setenv("ASAP_TOOL_CHOICE", "any")
-    assert initial_tool_choice("claude-sonnet-5-5") == "any"
+    assert initial_tool_choice("claude-sonnet-5-5", override="any") == "any"

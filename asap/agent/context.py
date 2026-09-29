@@ -26,6 +26,12 @@ from ..models import RunState
 # Budget accounting uses the provider's exact usage whenever it is reported; this only drives projections.
 CHARS_PER_TOKEN = 2.5
 
+# How much of an older tool result survives compaction: enough facts to cite, not the raw payload.
+DIGEST_MAX_CHARS = 200
+DIGEST_LOG_CLUSTERS = 3
+DIGEST_LOG_TEMPLATE_CHARS = 90
+DIGEST_REVISIONS = 4
+
 
 class TokenBudgetExceeded(Exception):
     pass
@@ -46,7 +52,8 @@ def digest_result(tool: str, r: dict) -> str:
             return f"{r['metric']}({r['service']}): baseline {r['baseline']} -> current {r['current']}, peak {r['peak']}{cp}"
         if tool == "search_logs":
             cl = r.get("clusters", [])
-            top = "; ".join(f"{c['count']}x {c['level']} {c['template'][:90]}" for c in cl[:3])
+            top = "; ".join(f"{c['count']}x {c['level']} {c['template'][:DIGEST_LOG_TEMPLATE_CHARS]}"
+                            for c in cl[:DIGEST_LOG_CLUSTERS])
             return f"logs({r.get('service')}): {len(cl)} clusters: {top}"
         if tool == "get_traces":
             d = (r.get("downstream") or [{}])[0]
@@ -56,7 +63,7 @@ def digest_result(tool: str, r: dict) -> str:
                     f"{d.get('peer.service')} {d.get('share_of_root_p99', 0):.0%} of p99, db.system={d.get('db.system')}")
         if tool == "get_deployment_history":
             revs = "; ".join(f"rev {x['revision']} {x['version']} ({x['age_minutes']:.0f}m ago"
-                             f"{', current' if x['current'] else ''})" for x in r.get("revisions", [])[:4])
+                             f"{', current' if x['current'] else ''})" for x in r.get("revisions", [])[:DIGEST_REVISIONS])
             return f"deploys({r.get('service')}): {revs}"
         if tool == "get_resource_state":
             return (f"state({r['name']}): {r['kind']} tier-{r['tier']} replicas={r['replicas']} hpa={r['hpa']} "
@@ -66,7 +73,7 @@ def digest_result(tool: str, r: dict) -> str:
     except (KeyError, TypeError, ValueError):
         pass
     s = json.dumps(r, default=str)
-    return s if len(s) <= 200 else s[:199] + "…"
+    return s if len(s) <= DIGEST_MAX_CHARS else s[:DIGEST_MAX_CHARS - 1] + "…"
 
 
 class ContextManager:

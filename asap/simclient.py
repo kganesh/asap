@@ -6,9 +6,11 @@ import httpx
 
 from .sim.api import EXECUTOR_TOKEN, READER_TOKEN
 
+DEFAULT_TIMEOUT_S = 5.0  # per request; a slow backend fails the read, and the caller decides (deny or skip)
+
 
 class SimClient:
-    def __init__(self, base_url: str, token: str, timeout: float = 5.0) -> None:
+    def __init__(self, base_url: str, token: str, timeout: float = DEFAULT_TIMEOUT_S) -> None:
         self._http = httpx.Client(base_url=base_url, timeout=timeout,
                                   headers={"Authorization": f"Bearer {token}"})
 

@@ -25,10 +25,10 @@ from rich.table import Table
 console = Console()
 
 
-def _llm(choice: str):  # type: ignore[no-untyped-def]
+def _llm(choice: str, settings):  # type: ignore[no-untyped-def]
     from .agent.llm import select_llm
 
-    return select_llm(choice)
+    return select_llm(choice, settings.llm)
 
 
 def _approval_mode(arg: str | None) -> str:
@@ -80,11 +80,11 @@ def cmd_demo(a: argparse.Namespace) -> int:
     from .sim.scenarios import SCENARIOS
 
     names = list(SCENARIOS) if a.scenario == "all" else [a.scenario]
-    llm = _llm(a.llm)
+    llm = _llm(a.llm, a.settings)
     mode = _approval_mode(a.approve)
     interactive = sys.stdin.isatty() and not a.no_pause
     ui = RichUI(console, verbose=a.verbose)
-    env = Env.create(Path(a.runs_dir), names[0])
+    env = Env.create(Path(a.runs_dir), names[0], settings=a.settings)
     console.rule(f"[bold]ASAP demo[/]  reasoner={llm.name}:{llm.model}  policy={env.policy.name}  approvals={mode}")
     if llm.name == "deterministic-reasoner":
         console.print("[dim]No ANTHROPIC_API_KEY / OPENAI_BASE_URL set: using the deterministic reasoner (no LLM). "
@@ -100,7 +100,8 @@ def cmd_demo(a: argparse.Namespace) -> int:
             _scenario_intro(i, len(names), sc)
             if not _pause(interactive, f"Start scenario {i}/{len(names)}"):
                 break
-            run, _ = run_scenario(env, n, llm, ApprovalGate(mode, render=ui.approval_packet), ui)
+            gate = ApprovalGate(mode, render=ui.approval_packet, ttl_seconds=a.settings.control.approval_ttl_s)
+            run, _ = run_scenario(env, n, llm, gate, ui)
             results.append((n, sc, run))
             _scenario_recap(sc, run, a.runs_dir)
             if i < len(names) and not _pause(interactive, f"Next: scenario {i + 1}/{len(names)}, {names[i]}"):
@@ -124,7 +125,7 @@ def cmd_attack(a: argparse.Namespace) -> int:
     from .console import RichUI
     from .harness import Env
 
-    env = Env.create(Path(a.runs_dir))
+    env = Env.create(Path(a.runs_dir))  # built-in defaults, not env overrides: the suite must be reproducible
     console.rule(f"[bold]Adversarial mock models vs. guardrails[/]  policy={env.policy.name}")
     try:
         rows = run_attacks(env, RichUI(console) if a.verbose else None, a.only)
@@ -145,7 +146,7 @@ def cmd_attack(a: argparse.Namespace) -> int:
 
 
 def cmd_storm(a: argparse.Namespace) -> int:
-    from .ingest.storm import capacity_model, run_storm
+    from .ingest.storm import CAPACITY_HEADROOM_MULTIPLIER, capacity_model, run_storm
     from .sim.scenarios import NOW
 
     stats, incidents = run_storm(NOW, a.alerts)
@@ -168,8 +169,9 @@ def cmd_storm(a: argparse.Namespace) -> int:
                       + ("  [yellow]suspected shared-infrastructure cause[/]" if i.suspected_shared_cause else ""))
     for note in stats.notes:
         console.print(f"  [yellow]{note}[/]")
-    cap = capacity_model(max(len(incidents), 1) * 5)
-    console.print(f"\nOnly {len(incidents)} LLM runs needed instead of {a.alerts:,}. Capacity model at 5x this rate: {cap}")
+    k = CAPACITY_HEADROOM_MULTIPLIER
+    cap = capacity_model(max(len(incidents), 1) * k)
+    console.print(f"\nOnly {len(incidents)} LLM runs needed instead of {a.alerts:,}. Capacity model at {k}x this rate: {cap}")
     return 0
 
 
@@ -191,10 +193,12 @@ def _replay_detail(event: str, p: dict) -> str:
 
 
 def cmd_tokens(a: argparse.Namespace) -> int:
-    from .agent.tokenreport import measure
+    from .agent.context import CHARS_PER_TOKEN
+    from .agent.tokenreport import CACHE_READ, CACHE_WRITE, measure
 
     rows = measure(Path(a.runs_dir) / "tokens")
-    t = Table(title="Input tokens per run (estimated: chars/4). Cost-equivalent models prompt caching (read 0.1x, write 1.25x)")
+    t = Table(title=f"Input tokens per run (estimated: chars/{CHARS_PER_TOKEN:g}). Cost-equivalent models prompt "
+                    f"caching (read {CACHE_READ:g}x, write {CACHE_WRITE:g}x)")
     for col in ("run", "LLM calls", "peak context", "total input", "cost-equiv. (cached)", "compactions", "outcome"):
         t.add_column(col, justify="left" if col in ("run", "outcome") else "right")
     for r in rows:
@@ -232,11 +236,14 @@ def cmd_verify(a: argparse.Namespace) -> int:
 def cmd_doctor(a: argparse.Namespace) -> int:
     from .control.policy import PolicyEngine
 
-    llm = _llm(a.llm)
-    pe = PolicyEngine()
+    llm = _llm(a.llm, a.settings)
+    pe = PolicyEngine(settings=a.settings.control)
     console.print(f"python      {sys.version.split()[0]}")
     console.print(f"reasoner    {llm.name}:{llm.model}")
     console.print(f"policy      {pe.name}  bundle {pe.digest}")
+    console.print(f"thresholds  {pe.constants}")
+    overrides = {k: v for k, v in a.settings.env_vars().items() if k in os.environ}
+    console.print(f"overrides   {overrides or 'none (built-in defaults; see asap/config.py)'}")
     if pe.name.startswith("none"):
         console.print("[yellow]No Rego evaluator: every action will be denied (fail closed). Run `make setup`.[/]")
     return 0
@@ -250,11 +257,17 @@ def cmd_sim(a: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .config import Settings
     from .sim.scenarios import SCENARIOS
 
+    try:
+        settings = Settings.from_env()  # the only place the environment is read for settings
+    except ValueError as e:
+        console.print(f"[red]invalid setting: {e}[/]")
+        return 2
     ap = argparse.ArgumentParser(prog="asap", description="Autonomous SRE Agentic Platform (PoC)")
-    ap.add_argument("--runs-dir", default=os.environ.get("ASAP_RUNS_DIR", "runs"))
-    ap.add_argument("--log-level", default=os.environ.get("ASAP_LOG_LEVEL", "WARNING"),
+    ap.add_argument("--runs-dir", default=settings.app.runs_dir)
+    ap.add_argument("--log-level", default=settings.app.log_level,
                     choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="operational logs to stderr (default WARNING)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     llm_help = "auto: Claude if ANTHROPIC_API_KEY, OpenAI-compatible if OPENAI_BASE_URL/OPENAI_API_KEY, else scripted"
@@ -299,6 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     sm.set_defaults(fn=cmd_sim)
 
     a = ap.parse_args(argv)
+    a.settings = settings
     _configure_logging(a.log_level)
     return int(a.fn(a))
 

@@ -15,13 +15,12 @@ import logging
 
 import httpx
 
+from ..config import ExecutionSettings
 from ..control.store import StateStore
 from ..models import DryRun, Proposal
 from ..simclient import SimClient
 
 log = logging.getLogger(__name__)
-
-VERIFY_WAIT_MINUTES = 5
 
 
 class PreconditionFailed(Exception):
@@ -29,9 +28,10 @@ class PreconditionFailed(Exception):
 
 
 class Executor:
-    def __init__(self, sim_url: str, store: StateStore) -> None:
+    def __init__(self, sim_url: str, store: StateStore, settings: ExecutionSettings | None = None) -> None:
         self.sim = SimClient.executor(sim_url)  # write credential lives only here
         self.store = store
+        self.settings = settings or ExecutionSettings()
         self.crash_after_apply = False  # test hook: simulate a crash between apply and bookkeeping
 
     # ------------------------------------------------------------------ dry run
@@ -140,11 +140,12 @@ class Executor:
     # ------------------------------------------------------------------ verify / revert
     def verify(self, root_service: str, alertnames: set[str]) -> dict:
         before = [a for a in self.sim.alerts() if a["labels"]["service"] == root_service]
-        # Simulator stand-in for waiting VERIFY_WAIT_MINUTES of wall clock.
-        self.sim.post("/admin/clock/advance", {"minutes": VERIFY_WAIT_MINUTES})
+        wait = self.settings.verify_wait_minutes
+        # Simulator stand-in for waiting `wait` minutes of wall clock.
+        self.sim.post("/admin/clock/advance", {"minutes": wait})
         after = [a for a in self.sim.alerts() if a["labels"]["service"] == root_service]
         still = sorted({a["labels"]["alertname"] for a in after})
-        return {"waited_minutes": VERIFY_WAIT_MINUTES, "root_service": root_service,
+        return {"waited_minutes": wait, "root_service": root_service,
                 "firing_before": sorted({a["labels"]["alertname"] for a in before}), "firing_after": still,
                 "recovered": not (set(still) & alertnames) and not still,
                 "sli_after": {a["labels"]["alertname"]: a["annotations"]["description"] for a in after}}

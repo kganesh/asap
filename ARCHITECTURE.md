@@ -19,6 +19,7 @@ Each decision, with the alternatives considered and the costs accepted, is recor
 | [0009](docs/adr/0009-deterministic-reasoner-fallback.md) | Deterministic reasoner when no LLM key is set | Proves the guardrails, not LLM diagnosis quality |
 | [0010](docs/adr/0010-context-caching-over-compaction.md) | Cache the conversation prefix; compact only as a safety valve; per-run token budget | Contexts stay larger (≤ 16k) to keep the cache warm |
 | [0011](docs/adr/0011-fleet-wide-blast-radius.md) | Fleet-wide blast radius: per-domain auto budget, incident-storm brake, fleet lock | During a shared-infrastructure outage ASAP stops acting and only reports |
+| [0012](docs/adr/0012-one-home-per-number.md) | One home per number: operational settings in `asap/config.py`, thresholds in Rego, algorithm constants named in code | Constructors take a settings argument; drift between the homes is tested |
 
 Legend used below: **[built]** means implemented in this PoC; **[design]** means specified for production but not built.
 

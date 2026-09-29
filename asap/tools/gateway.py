@@ -14,7 +14,9 @@ from dataclasses import dataclass
 import httpx
 from pydantic import ValidationError
 
+from ..config import Limits
 from ..models import Evidence, RunState, new_id
+from ..signals import CHANGE_POINT_CONSECUTIVE_SAMPLES, anomaly_threshold
 from ..simclient import SimClient
 from ..timeutil import iso
 from .sanitize import sanitize
@@ -33,8 +35,9 @@ PROMQL = {
 }
 log = logging.getLogger(__name__)
 
-MAX_READ_CALLS_PER_RUN = 20
-MAX_RESULT_CHARS = 6000
+BASELINE_FRACTION = 3  # the first 1/3 of the window is the baseline
+TREND_POINTS = 5  # most recent samples returned for the model to eyeball
+TRUNCATED_LOG_CLUSTERS = 4  # clusters kept when a log result is over the size limit
 
 
 class ToolRejected(Exception):
@@ -52,27 +55,29 @@ def summarize_series(values: list[list]) -> dict:
     pts = [(float(t), float(v)) for t, v in values]
     if not pts:
         return {"samples": 0}
-    third = max(1, len(pts) // 3)
+    n = CHANGE_POINT_CONSECUTIVE_SAMPLES
+    third = max(1, len(pts) // BASELINE_FRACTION)
     base = sum(v for _, v in pts[:third]) / third
     cur_t, cur = pts[-1]
     peak_t, peak = max(pts, key=lambda p: p[1])
-    thresh = max(base * 2, base + 0.02)
+    thresh = anomaly_threshold(base)
     change = None
-    for i in range(third, len(pts) - 2):
-        if all(v > thresh for _, v in pts[i:i + 3]):
+    for i in range(third, len(pts) - n + 1):
+        if all(v > thresh for _, v in pts[i:i + n]):
             change = pts[i][0]
             break
     return {
         "baseline": round(base, 4), "current": round(cur, 4), "peak": round(peak, 4), "peak_at": iso(peak_t),
         "change_point": iso(change) if change else None,
         "minutes_since_change": round((cur_t - change) / 60, 1) if change else None,
-        "trend_last_5_points": [round(v, 4) for _, v in pts[-5:]], "samples": len(pts),
+        f"trend_last_{TREND_POINTS}_points": [round(v, 4) for _, v in pts[-TREND_POINTS:]], "samples": len(pts),
     }
 
 
 class ToolGateway:
-    def __init__(self, sim_url: str) -> None:
+    def __init__(self, sim_url: str, limits: Limits | None = None) -> None:
         self.sim = SimClient.reader(sim_url)  # read-only credential
+        self.limits = limits or Limits()
 
     def validate(self, name: str, args: dict) -> object:
         model = ALL_TOOLS.get(name)
@@ -94,8 +99,8 @@ class ToolGateway:
     def run_read(self, run: RunState, name: str, args: dict) -> ToolResult:
         if name not in READ_TOOLS:
             raise ToolRejected(f"{name} is not a read tool")
-        if run.tool_calls >= MAX_READ_CALLS_PER_RUN:
-            raise ToolRejected(f"read-tool quota ({MAX_READ_CALLS_PER_RUN}) exhausted for this run")
+        if run.tool_calls >= self.limits.max_read_calls:
+            raise ToolRejected(f"read-tool quota ({self.limits.max_read_calls}) exhausted for this run")
         parsed = self.validate(name, args)
         run.tool_calls += 1
         try:
@@ -113,7 +118,7 @@ class ToolGateway:
         if flags:
             log.warning("redacted %d instruction-like string(s) from %s result", len(flags), name)
             clean["_gateway_note"] = f"{len(flags)} untrusted instruction-like string(s) redacted"
-        clean = _truncate(clean)
+        clean = _truncate(clean, self.limits.max_result_chars)
         args = parsed.model_dump(exclude={"reasoning"})  # type: ignore[attr-defined]
         run.evidence[eid] = Evidence(eid, name, kind, args, clean, self.sim.now())
         return ToolResult(True, {"evidence_id": eid, **clean}, eid)
@@ -142,11 +147,11 @@ class ToolGateway:
         return "deps", self.sim.dependencies(a.service)
 
 
-def _truncate(d: dict) -> dict:
+def _truncate(d: dict, max_chars: int) -> dict:
     import json
     s = json.dumps(d, default=str)
-    if len(s) <= MAX_RESULT_CHARS:
+    if len(s) <= max_chars:
         return d
     if "clusters" in d:
-        d = {**d, "clusters": d["clusters"][:4], "_truncated": True}
+        d = {**d, "clusters": d["clusters"][:TRUNCATED_LOG_CLUSTERS], "_truncated": True}
     return d

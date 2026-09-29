@@ -12,14 +12,13 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from ..config import IngestSettings
+
 SEVERITY_WEIGHT = {"critical": 3, "warning": 2, "info": 1}
-DEDUP_WINDOW_S = 300
-CORRELATION_WINDOW_S = 120 * 5  # alerts within 10 minutes of each other in one cell may be one incident
-FLAP_LIMIT = 2  # state flips in 10 minutes
-DEBOUNCE_S = 120  # matches the rule's `for: 2m`
-# If this many separate incidents open in one failure domain at once, the dependency graph probably doesn't
-# contain the real cause (DNS, mesh, node pool, zone, provider): flag them so the agent and the policy know.
-SHARED_CAUSE_INCIDENTS = 4
+# Incident priority = severity x SEVERITY_SCALE + criticality x TIER_SCALE + number of affected services.
+SEVERITY_SCALE = 10
+TIER_SCALE = 5
+LOWEST_TIER = 3  # tiers run 0 (most critical) to 3; unknown services rank as the lowest
 
 
 def _ts(s: str) -> float:
@@ -63,9 +62,15 @@ class FunnelStats:
 
 
 class AlertPipeline:
-    def __init__(self, dependencies: dict[str, list[str]], tiers: dict[str, int]) -> None:
+    def __init__(self, dependencies: dict[str, list[str]], tiers: dict[str, int],
+                 settings: IngestSettings | None = None, shared_cause_incidents: int | None = None) -> None:
+        """shared_cause_incidents: if this many separate incidents open in one failure domain at once, the
+        dependency graph probably doesn't contain the real cause (DNS, mesh, node pool, zone, provider), so
+        they are flagged. Pass the policy's `storm_incident_threshold`; None disables the flag."""
         self.deps = dependencies  # service -> downstream services
         self.tiers = tiers
+        self.settings = settings or IngestSettings()
+        self.shared_cause_incidents = shared_cause_incidents
         self.seen: dict[str, float] = {}  # fingerprint -> last seen (dedup window state)
         self.transitions: dict[str, list[float]] = defaultdict(list)  # fingerprint -> state changes
         self.stats = FunnelStats()
@@ -79,16 +84,17 @@ class AlertPipeline:
         if state != "active":
             st.resolved_or_expired += 1
             return False
-        recent = [t for t in self.transitions[fp] if now - t < 600]
-        if len(recent) >= FLAP_LIMIT:
+        cfg = self.settings
+        recent = [t for t in self.transitions[fp] if now - t < cfg.flap_window_s]
+        if len(recent) >= cfg.flap_limit:
             st.flapping += 1
             return False
-        if now - _ts(alert["startsAt"]) < DEBOUNCE_S:
+        if now - _ts(alert["startsAt"]) < cfg.debounce_s:
             st.debounced += 1
             return False
         last = self.seen.get(fp)
         self.seen[fp] = now
-        if last is not None and now - last < DEDUP_WINDOW_S:
+        if last is not None and now - last < cfg.dedup_window_s:
             st.duplicates += 1
             return False
         st.unique += 1
@@ -122,7 +128,8 @@ class AlertPipeline:
         for (cluster, cell), svc_alerts in by_domain.items():
             domain_incidents = [self._incident(cluster, cell, component, svc_alerts)
                                 for component in self._components(set(svc_alerts))]
-            if len(domain_incidents) >= SHARED_CAUSE_INCIDENTS:
+            limit = self.shared_cause_incidents
+            if limit is not None and len(domain_incidents) >= limit:
                 self.stats.notes.append(f"{cluster}/{cell}: {len(domain_incidents)} simultaneous incidents; "
                                         "suspected shared-infrastructure cause")
                 for i in domain_incidents:
@@ -159,13 +166,14 @@ class AlertPipeline:
     def _incident(self, cluster: str, cell: str, comp: set[str], svc_alerts: dict[str, list[dict]]) -> Incident:
         # Root = the deepest alerting service: none of its downstream dependencies are alerting.
         roots = [s for s in comp if not (self._reachable(s) & comp)]
-        root = sorted(roots, key=lambda s: (self.tiers.get(s, 9), s))[0]
+        root = sorted(roots, key=lambda s: (self.tiers.get(s, LOWEST_TIER), s))[0]
         alerts = [a for s in sorted(comp) for a in svc_alerts[s]]
         started = min(_ts(a["startsAt"]) for a in alerts)
         sev = max((a["labels"].get("severity", "info") for a in alerts), key=lambda x: SEVERITY_WEIGHT.get(x, 0))
-        window = int(started // CORRELATION_WINDOW_S)
+        window = int(started // self.settings.correlation_window_s)
         iid = "inc-" + hashlib.sha256(f"{cluster}|{cell}|{root}|{window}".encode()).hexdigest()[:10]
-        priority = SEVERITY_WEIGHT.get(sev, 1) * 10 + (3 - min(self.tiers.get(root, 3), 3)) * 5 + len(comp)
+        criticality = LOWEST_TIER - min(self.tiers.get(root, LOWEST_TIER), LOWEST_TIER)
+        priority = SEVERITY_WEIGHT.get(sev, SEVERITY_WEIGHT["info"]) * SEVERITY_SCALE + criticality * TIER_SCALE + len(comp)
         return Incident(iid, cluster, cell, root, sorted(comp), alerts, started, priority, sev)
 
 

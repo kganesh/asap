@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .agent.llm import LLM
 from .agent.orchestrator import Orchestrator
 from .agent.states import Limits
+from .config import Settings
 from .control.approval import ApprovalGate
 from .control.plane import Controls
 from .control.policy import PolicyEngine
@@ -25,15 +26,18 @@ class Env:
     store: StateStore
     policy: PolicyEngine
     runs_dir: Path
+    settings: Settings = field(default_factory=Settings)
 
     @classmethod
-    def create(cls, runs_dir: Path, scenario: str = "bad_deploy", fresh_store: bool = True) -> Env:
+    def create(cls, runs_dir: Path, scenario: str = "bad_deploy", fresh_store: bool = True,
+               settings: Settings | None = None) -> Env:
+        settings = settings or Settings()
         runs_dir.mkdir(parents=True, exist_ok=True)
         db = runs_dir / "state.db"
         if fresh_store and db.exists():
             db.unlink()
         server = SimServer(SCENARIOS[scenario].build()).start()
-        return cls(server, StateStore(db), PolicyEngine(), runs_dir)
+        return cls(server, StateStore(db), PolicyEngine(settings=settings.control), runs_dir, settings)
 
     def load(self, scenario: str) -> None:
         self.server.load(SCENARIOS[scenario].build())
@@ -43,12 +47,14 @@ class Env:
         catalog = sim.catalog()
         deps = {s: sim.dependencies(s)["downstream"] for s in catalog}
         tiers = {s: v["tier"] for s, v in catalog.items()}
-        return AlertPipeline(deps, tiers).process(sim.alerts(), sim.now())
+        pipeline = AlertPipeline(deps, tiers, self.settings.ingest,
+                                 shared_cause_incidents=self.policy.constants.get("storm_incident_threshold"))
+        return pipeline.process(sim.alerts(), sim.now())
 
     def orchestrator(self, llm: LLM, approval: ApprovalGate, ui: object | None = None,
                      controls: Controls | None = None, limits: Limits | None = None) -> Orchestrator:
         return Orchestrator(self.server.url, llm, self.store, self.policy, approval, self.runs_dir, ui,
-                            controls, limits)
+                            controls, limits, self.settings)
 
     def close(self) -> None:
         self.server.stop()

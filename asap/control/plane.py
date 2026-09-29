@@ -13,12 +13,14 @@ submit(proposal) -> Decision:
 from __future__ import annotations
 
 import logging
-import os
+from dataclasses import dataclass
 
 import httpx
 
+from ..config import ControlSettings
 from ..executor.executor import Executor
 from ..models import Decision, DryRun, Evidence, Proposal, RunState
+from ..signals import is_anomalous
 from ..simclient import SimClient
 from .approval import state_hash
 from .policy import PolicyEngine, PolicyUnavailable
@@ -26,42 +28,57 @@ from .store import StateStore, StoreUnavailable
 
 log = logging.getLogger(__name__)
 
+# Blast-radius score, 0-100: criticality + irreversibility + fan-out. The approval threshold is the policy's
+# `approval_blast_radius`; these weights only rank how dangerous an action is.
+MAX_BLAST_RADIUS = 100
 TIER_WEIGHT = {0: 40, 1: 20, 2: 10}
+LOWEST_TIER_WEIGHT = TIER_WEIGHT[2]  # unknown or lower tiers
 
 
 class ContextUnavailable(Exception):
     pass
 REVERSIBILITY = {"rollback": 15, "cache_flush": 25, "restart": 10, "scale_up": 0, "scale_down": 15}
+UNKNOWN_ACTION_REVERSIBILITY = max(REVERSIBILITY.values())
+WEIGHT_PER_UPSTREAM_CALLER = 5
+UPSTREAM_WEIGHT_CAP = 20
+RESTART_FULL_CYCLE_WEIGHT = 15  # a restart cycles every pod
+
+TIER_BY_VERDICT = {"allow": 1, "require_approval": 2, "deny": 3}
 
 
 def blast_radius(action: str, target_state: dict, upstream: list[str], params: dict) -> int:
     kind = action
     if action == "scale":
         kind = "scale_up" if params.get("replicas", 0) > target_state.get("replicas", 0) else "scale_down"
-    score = TIER_WEIGHT.get(target_state.get("tier", 2), 10)
-    score += REVERSIBILITY.get(kind, 25)
-    score += min(20, 5 * len(upstream))
+    score = TIER_WEIGHT.get(target_state.get("tier"), LOWEST_TIER_WEIGHT)
+    score += REVERSIBILITY.get(kind, UNKNOWN_ACTION_REVERSIBILITY)
+    score += min(UPSTREAM_WEIGHT_CAP, WEIGHT_PER_UPSTREAM_CALLER * len(upstream))
     if action == "restart":
-        score += 15  # every pod is cycled
-    return min(100, score)
+        score += RESTART_FULL_CYCLE_WEIGHT
+    return min(MAX_BLAST_RADIUS, score)
 
 
+@dataclass
 class Controls:
     """Global switches. In production these are flags in the control-plane config service."""
 
-    def __init__(self) -> None:
-        self.kill_switch = os.environ.get("ASAP_KILL_SWITCH", "0") == "1"
-        self.change_freeze = os.environ.get("ASAP_CHANGE_FREEZE", "0") == "1"
+    kill_switch: bool = False
+    change_freeze: bool = False
+
+    @classmethod
+    def from_settings(cls, s: ControlSettings) -> Controls:
+        return cls(kill_switch=s.kill_switch, change_freeze=s.change_freeze)
 
 
 class ControlPlane:
     def __init__(self, sim_url: str, store: StateStore, executor: Executor, policy: PolicyEngine,
-                 controls: Controls | None = None) -> None:
+                 controls: Controls | None = None, settings: ControlSettings | None = None) -> None:
         self.sim = SimClient.reader(sim_url)  # the control plane reads context with its own credential
         self.store = store
         self.executor = executor
         self.policy = policy
-        self.controls = controls or Controls()
+        self.settings = settings or ControlSettings()
+        self.controls = controls or Controls.from_settings(self.settings)
 
     # ------------------------------------------------------------------ scope (derived, not trusted)
     def incident_scope(self, run: RunState) -> set[str]:
@@ -90,8 +107,7 @@ class ControlPlane:
             return False
         r = e.result
         base, cur = r.get("baseline"), r.get("current")
-        return r.get("change_point") is not None or (
-            base is not None and cur is not None and cur > max(2 * base, base + 0.02))
+        return r.get("change_point") is not None or (base is not None and cur is not None and is_anomalous(cur, base))
 
     def build_input(self, run: RunState, p: Proposal, dry: DryRun) -> tuple[dict, int]:
         """All context comes from sources the control plane reads itself. Any read failure raises
@@ -111,9 +127,10 @@ class ControlPlane:
         cited = [run.evidence.get(e) for e in p.evidence_ids]
         valid = bool(p.evidence_ids) and all(cited)
         has_relevant_metric = valid and any(self.relevant_metric(e, p.target) for e in cited)
-        fleet = self.store.fleet(run.domain, now)
-        budget = self.store.budget(p.target, now)
-        budget["circuit_open"] = self.store.circuit_open(p.target, p.action, now)
+        cfg = self.settings
+        fleet = self.store.fleet(run.domain, now, cfg.fleet_window_s)
+        budget = self.store.budget(p.target, now, cfg.budget_short_window_s, cfg.budget_long_window_s)
+        budget["circuit_open"] = self.store.circuit_open(p.target, p.action, now, cfg.circuit_window_s)
         br = blast_radius(p.action, st, upstream, p.params)
         policy_input = {
             "action": {"type": p.action, "target": p.target, "params": p.params},
@@ -134,29 +151,33 @@ class ControlPlane:
         }
         return policy_input, br
 
+    def _fail_closed(self, p: Proposal, reason: str, br: int = MAX_BLAST_RADIUS, dry: DryRun | None = None,
+                     policy_input: dict | None = None) -> Decision:
+        return Decision(p.proposal_id, "deny", TIER_BY_VERDICT["deny"], [f"{reason}: failing closed"], br, dry,
+                        policy_input or {}, self.policy.name)
+
     def submit(self, run: RunState, p: Proposal) -> Decision:
         try:
             dry = self.executor.dry_run(p)
         except httpx.HTTPError as e:
             log.warning("dry-run failed to reach the cluster: %s", e)
-            return Decision(p.proposal_id, "deny", 3, [f"dry-run could not reach the cluster ({type(e).__name__}): "
-                                                       "failing closed"], 100, None, {}, self.policy.name)
+            return self._fail_closed(p, f"dry-run could not reach the cluster ({type(e).__name__})")
         try:
             policy_input, br = self.build_input(run, p, dry)
         except (StoreUnavailable, ContextUnavailable) as e:
             log.warning("denying %s on %s: %s", p.action, p.target, e)
-            return Decision(p.proposal_id, "deny", 3, [f"{e}: failing closed"], 100, dry, {}, self.policy.name)
+            return self._fail_closed(p, str(e), dry=dry)
         try:
             out = self.policy.evaluate(policy_input)
         except PolicyUnavailable as e:
             log.error("policy engine unavailable, denying: %s", e)
-            return Decision(p.proposal_id, "deny", 3, [f"policy engine unavailable ({e}): failing closed"], br, dry,
-                            policy_input, self.policy.name)
-        tier = {"allow": 1, "require_approval": 2, "deny": 3}[out["decision"]]
-        reasons = out["deny"] if tier == 3 else out["require_approval"] if tier == 2 else [
-            "within tier-1 bounds: reversible, capacity-safe, anomalous metric on the target"]
-        return Decision(p.proposal_id, out["decision"], tier, reasons, br, dry, policy_input, self.policy.name,
-                        required_approvals=out["required_approvals"] if tier == 2 else 0)
+            return self._fail_closed(p, f"policy engine unavailable ({e})", br, dry, policy_input)
+        verdict = out["decision"]
+        reasons = {"deny": out["deny"], "require_approval": out["require_approval"]}.get(verdict, [
+            "within tier-1 bounds: reversible, capacity-safe, anomalous metric on the target"])
+        return Decision(p.proposal_id, verdict, TIER_BY_VERDICT[verdict], reasons, br, dry, policy_input,
+                        self.policy.name,
+                        required_approvals=out["required_approvals"] if verdict == "require_approval" else 0)
 
     def revalidate(self, run: RunState, p: Proposal, original: Decision,
                    approved_state_hash: str | None = None) -> tuple[bool, str, Decision]:
