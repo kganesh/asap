@@ -137,7 +137,7 @@ Correlation roots each incident at the *deepest failing dependency* within a fai
 
 **Tokens per run: one live run plus calibrated estimates.**
 
-*Live runs, Claude Sonnet 5.5* (exact provider usage from each run's `audit.jsonl`; one run per scenario):
+*Live runs, Claude Sonnet 5.5* (exact provider usage from each run's `audit.jsonl`; one run per scenario; reports and verifiable audit logs in [docs/live-runs](docs/live-runs/README.md)):
 
 | Scenario | Outcome | Diagnosis (confidence) | LLM calls | Input processed (cache reads) | Cost-equiv.¹ | Output | LLM time |
 |---|---|---|---|---|---|---|---|

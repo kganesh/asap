@@ -7,6 +7,7 @@ The design rule behind everything: **the LLM only proposes, and a deterministic 
 - [ARCHITECTURE.md](ARCHITECTURE.md): data plane and control plane, the agent state machine, tool contracts, and the choice of reasoning pattern
 - [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md): guardrails, blast radius and human-in-the-loop (HITL), audit, alert storms, measured LLM token cost and capacity, failure modes and consistency
 - [docs/adr](docs/adr/README.md): ten Architecture Decision Records: options considered, decision, trade-offs accepted
+- [docs/live-runs](docs/live-runs/README.md): evidence from live Claude Sonnet 5.5 runs of all three scenarios: reports and verifiable hash-chained audit logs
 
 ---
 
@@ -103,7 +104,7 @@ tests/          scenarios, adversarial attacks, production edge cases, unit test
 | Audit anchors in `runs/anchors.jsonl` | Chain heads anchored to WORM storage (S3 Object Lock) |
 | Verification "waits" by advancing a virtual clock | Real wall-clock verification window |
 | Token figures in `make tokens` are estimates from the deterministic reasoner, calibrated against one live Claude run (see SYSTEM_DESIGN.md) | Provider-reported usage per call, already logged in `audit.jsonl` on live runs; capacity model re-derived from those |
-| Demos and CI use the deterministic reasoner; one live Claude Sonnet 5.5 run per scenario, all three correct (SYSTEM_DESIGN.md), but no scored evaluation set yet | Offline evaluation set of replayed incidents scoring diagnosis accuracy per model and prompt version, gating upgrades and any tier-1 autonomy |
+| Demos and CI use the deterministic reasoner; one live Claude Sonnet 5.5 run per scenario, all three correct ([evidence](docs/live-runs/README.md)), but no scored evaluation set yet | Offline evaluation set of replayed incidents scoring diagnosis accuracy per model and prompt version, gating upgrades and any tier-1 autonomy |
 
 ## Troubleshooting
 
