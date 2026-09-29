@@ -2,6 +2,22 @@
 
 > **Thesis.** The LLM is an *untrusted planner*. It may read telemetry freely and may *propose* one of four remediations. It can never execute anything. A deterministic control plane (policy-as-code, dry-run, blast radius, human approval, budgets) decides, and a separate executor holding the only write credential acts, then verifies.
 
+## Key decisions
+
+Each decision, with the alternatives considered and the costs accepted, is recorded as an ADR in [docs/adr](docs/adr/README.md).
+
+| # | Decision | Main trade-off accepted |
+|---|---|---|
+| [0001](docs/adr/0001-llm-proposes-control-plane-decides.md) | The LLM only proposes; a deterministic control plane decides and acts | More components; the agent can't act even when it is obviously right |
+| [0002](docs/adr/0002-plan-and-execute-with-bounded-react.md) | Plan-and-Execute with bounded ReAct and a replan edge | One extra LLM call per incident |
+| [0003](docs/adr/0003-custom-state-machine-over-agent-framework.md) | Custom state machine rather than LangGraph / AutoGen / CrewAI | We own persistence and resumption |
+| [0004](docs/adr/0004-policy-as-code-in-rego.md) | Policy in OPA/Rego, fail-closed evaluation | Evaluator dependency; no engine means no actions |
+| [0005](docs/adr/0005-fail-open-detection-fail-closed-execution.md) | Detection fails open, execution fails closed; ASAP beside paging | Less automation during provider outages |
+| [0006](docs/adr/0006-linearizable-leases-and-budgets.md) | Linearizable leases and budgets; deny under partition | Store outage halts remediation |
+| [0007](docs/adr/0007-kafka-keyed-by-failure-domain.md) | Alert stream keyed by failure domain | Hot partitions during large-cell storms |
+| [0008](docs/adr/0008-remediate-through-controllers.md) | Roll back through GitOps, scale through the HPA | Slower (sync interval); Git and Argo CD in the path |
+| [0009](docs/adr/0009-deterministic-reasoner-fallback.md) | Deterministic reasoner when no LLM key is set | Proves the guardrails, not LLM diagnosis quality |
+
 Legend used below: **[built]** means implemented in this PoC; **[design]** means specified for production but not built.
 
 ---
@@ -123,7 +139,7 @@ The LLM drives only PLAN, INVESTIGATE and PROPOSE. Code owns every other transit
 | **Plan-and-Execute + bounded ReAct** | Plan is auditable, shown to approvers, bounds the loop | One extra LLM call per run | Stale plan when the first hypothesis fails; mitigated by the **replan edge** | **Default (built)** |
 | Multi-agent consensus (2 independent diagnoses + judge) | Catches single-model anchoring; disagreement is a signal | ~2-3x tokens and wall-clock; more to audit | Correlated errors if both share prompt and model | **[design]** tier-2 proposals on tier-0 services only |
 
-**Why a custom loop rather than LangGraph:** LangGraph (with `interrupt()` for approval) would be a reasonable choice. The custom state machine (~350 lines) keeps the guardrail boundary visible: there is no framework code between the LLM output and the executor, the transition table is a reviewable artifact, and every step is persisted and audited on our terms.
+**Why a custom loop rather than LangGraph:** LangGraph (with `interrupt()` for approval) would be a reasonable choice. The custom state machine (~450 lines) keeps the guardrail boundary visible: there is no framework code between the LLM output and the executor, the transition table is a reviewable artifact, and every step is persisted and audited on our terms.
 
 ### Tool contracts (`asap/tools/schemas.py`)
 

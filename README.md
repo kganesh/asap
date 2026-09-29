@@ -6,6 +6,7 @@ The design rule behind everything: **the LLM only proposes, and a deterministic 
 
 - [ARCHITECTURE.md](ARCHITECTURE.md): data plane and control plane, the agent state machine, tool contracts, and the choice of reasoning pattern
 - [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md): guardrails, blast radius and human-in-the-loop (HITL), audit, alert storms, failure modes and consistency
+- [docs/adr](docs/adr/README.md): nine Architecture Decision Records: options considered, decision, trade-offs accepted
 
 ---
 
